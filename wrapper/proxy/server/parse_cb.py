@@ -7,7 +7,7 @@
 
 import json
 
-from proxy.entity.entityclasses import Entity
+from proxy.entity.entitybasics import Entity
 from proxy.utils.constants import *
 
 # Py3-2
@@ -16,6 +16,31 @@ PY3 = sys.version_info > (3,)
 if PY3:
     # noinspection PyShadowingBuiltins
     xrange = range
+
+TRANSLATE = {
+    "op":
+        [
+            {'clickEvent': {'action': 'suggest_command', 'value': '/op '},
+             'translate': 'commands.op.usage'},
+
+            {'clickEvent': {'action': 'suggest_command', 'value': '/op '},
+             'text':
+                 '/op <player> [-s SUPEROP] [-o OFFLINE] [-l <superoplevel>]',
+             'italic': True,
+             'color': 'yellow'}
+        ],
+    "whitelist":
+        [
+            {'clickEvent': {'value': '/whitelist ', 'action': 'suggest_command'},
+             'translate': 'commands.whitelist.usage'},
+
+            {'clickEvent': {'action': 'suggest_command', 'value': '/whitelist '},
+             'text':
+                 '/whitelist <on|off|list|add|remvove|reload|offline|online>',
+             'italic': True,
+             'color': 'yellow'}
+        ],
+}
 
 
 # noinspection PyMethodMayBeStatic
@@ -33,47 +58,172 @@ class ParseCB(object):
         self.packet = packet
         self.ent_control = self.proxy.entity_control
 
-    def parse_play_combat_event(self):
-        """ just parsed for testing for now """
-        pass
-        # 1.9 packet, conditionally parsed
-        # print("\nSTART COMB_PARSE\n")
-        # data = self.packet.readpkt([VARINT, ])
-        # print("\nread COMB_PARSE\n")
-        # if data[0] == 2:
-        #    # print("\nread COMB_PARSE2\n")
-        #    #player_i_d = self.packet.readpkt([VARINT, ])
-        #    # print("\nread COMB_PARSE3\n")
-        #    #e_i_d = self.packet.readpkt([INT, ])
-        #    # print("\nread COMB_PARSE4\n")
-        #    #strg = self.packet.readpkt([STRING, ])
+    # Items that need parsed and re-sent with proper offline/online UUID
+    # translation.
 
-        #    # print("\nplayerEID=%s\nEID=%s\n" % (player_i_d, e_i_d))
-        #    # print("\nTEXT=\n%s\n" % strg)
+    def parse_play_player_list_item(self):
+        """This must be parsed and modified to make sure UUIDs match.
+        Otherwise weird things can happen likee players not seeing
+        each other or duplicate names on the tab list, etc."""
+        if self.server.version >= PROTOCOL_1_8START:
+            head = self.packet.readpkt([VARINT, VARINT])
+            # ("varint:action|varint:length")
+            lenhead = head[1]
+            action = head[0]
+            z = 0
+            while z < lenhead:
+                serveruuid = self.packet.readpkt([UUID])[0]
+                playerclient = self.proxy.getclientbyofflineserveruuid(
+                    serveruuid)
+                if not playerclient:
+                    z += 1
+                    continue
+                uuid = playerclient.online_uuid
+                z += 1
+                if action == 0:
+                    properties = playerclient.properties
+                    raw = b""
+                    for prop in properties:
+                        raw += self.client.packet.send_string(prop["name"])
+                        raw += self.client.packet.send_string(prop["value"])
+                        if "signature" in prop:
+                            raw += self.client.packet.send_bool(True)
+                            raw += self.client.packet.send_string(
+                                prop["signature"])
+                        else:
+                            raw += self.client.packet.send_bool(False)
+                    raw += self.client.packet.send_varint(0)
+                    raw += self.client.packet.send_varint(0)
+                    raw += self.client.packet.send_bool(False)
+                    self.client.packet.sendpkt(
+                        self.pktCB.PLAYER_LIST_ITEM,
+                        [VARINT, VARINT, UUID, STRING, VARINT, RAW],
+                        (0, 1, uuid, playerclient.username,
+                         len(properties), raw))
 
-        #    # return True
+                elif action == 1:
+                    data = self.packet.readpkt([VARINT])
+
+                    # noinspection PyUnusedLocal
+                    # todo should we be using this to set client gamemode?
+                    gamemode = data[0]
+                    # print("GAMEMODE (parse_cb): %s" % gamemode)
+                    # ("varint:gamemode")
+                    self.client.packet.sendpkt(
+                        self.pktCB.PLAYER_LIST_ITEM,
+                        [VARINT, VARINT, UUID, VARINT],
+                        (1, 1, uuid, gamemode))
+                    # print(1, 1, uuid, gamemode)
+                elif action == 2:
+                    data = self.packet.readpkt([VARINT])
+                    ping = data[0]
+                    # ("varint:ping")
+                    self.client.packet.sendpkt(
+                        self.pktCB.PLAYER_LIST_ITEM,
+                        [VARINT, VARINT, UUID, VARINT],
+                        (2, 1, uuid, ping))
+                elif action == 3:
+                    data = self.packet.readpkt([BOOL])
+                    # ("bool:has_display")
+                    hasdisplay = data[0]
+                    if hasdisplay:
+                        data = self.packet.readpkt([STRING])
+                        displayname = data[0]
+                        # ("string:displayname")
+                        self.client.packet.sendpkt(
+                            self.pktCB.PLAYER_LIST_ITEM,
+                            [VARINT, VARINT, UUID, BOOL, STRING],
+                            (3, 1, uuid, True, displayname))
+
+                    else:
+                        self.client.packet.sendpkt(
+                            self.pktCB.PLAYER_LIST_ITEM,
+                            [VARINT, VARINT, UUID, VARINT],
+                            (3, 1, uuid, False))
+
+                elif action == 4:
+                    self.client.packet.sendpkt(
+                        self.pktCB.PLAYER_LIST_ITEM,
+                        [VARINT, VARINT, UUID],
+                        (4, 1, uuid))
+
+                return False
+        else:  # version < 1.7.9 needs no processing
+            return True
         return True
+
+    def parse_play_spawn_player(self):  # embedded UUID -must parse.
+        # This packet  is used to spawn other players into a player
+        # client's world.  if this packet does not arrive, the other
+        #  player(s) will not be visible to the client
+        # it does not play a role in the player's spawing process.
+        if self.server.version < PROTOCOL_1_8START:
+            dt = self.packet.readpkt([VARINT, STRING, REST])
+        else:
+            dt = self.packet.readpkt([VARINT, UUID, REST])
+        # 1.7.6 "varint:eid|string:uuid|rest:metadt")
+        # 1.8 "varint:eid|uuid:uuid|int:x|int:y|int:z|byte:yaw|
+        #     byte:pitch|short:item|rest:metadt")
+        # 1.9 "varint:eid|uuid:uuid|int:x|int:y|int:z|byte:yaw|
+        #     yte:pitch|rest:metadt")
+
+        # We dont need to read the whole thing.
+        clientserverid = self.proxy.getclientbyofflineserveruuid(dt[1])
+        if clientserverid.online_uuid:
+            # print("parseCB::  %s" % clientserverid.online_uuid.string)
+            # print("parseCB::  %s" % clientserverid.online_uuid)
+            if self.server.version < PROTOCOL_1_8START:
+                self.client.packet.sendpkt(
+                    self.pktCB.SPAWN_PLAYER,
+                    [VARINT, STRING, RAW],
+                    (dt[0], clientserverid.online_uuid.string, dt[2]))
+            else:
+                # print("UUID of spawned player = %s  : Should be online uuid" % clientserverid.online_uuid)
+                self.client.packet.sendpkt(
+                    self.pktCB.SPAWN_PLAYER,
+                    [VARINT, UUID, RAW],
+                    (dt[0], clientserverid.online_uuid, dt[2]))
+            return False
+        return True
+
+    # Wrapper events and info section:
 
     def parse_play_chat_message(self):
         data, position = self.packet.readpkt(self.pktCB.CHAT_MESSAGE[PARSER])
         # position (1.8+ only)
         # 0: chat (chat box), 1: system message (chat box), 2: above hotbar
-
+        # print("SEND", type(data), data)
         # Over-ride OP help display
-        if "/op <player>" in data:
-            new_usage = "player> [-s SUPER-OP] [-o OFFLINE] [-l <level>]"
-            message = data.replace("player>", new_usage)
-            data = message
+
+        for eachtrans in TRANSLATE:
+            if TRANSLATE[eachtrans][0] == data:
+                new_usage = TRANSLATE[eachtrans][1]
+                data = new_usage
+        # self.log.debug(data)
 
         payload = self.proxy.eventhandler.callevent(
             "player.chatbox", {"playername": self.client.username,
                                "json": data})
-        '''
-        :decription: Chat message sent from server to the client.
+        """ eventdoc
+            <group> Proxy <group>
 
-        :Event: Can be hidden by returning False.  New `data` can be returned
-        to change what is sent to client.
-        '''
+            <description> Chat message sent from the server to the client.
+            <description>
+
+            <abortable> Yes <abortable>
+
+            <comments>
+            - The message will not reach the client if the event is returned False.
+            - If json chat (dict) or text is returned, that value will be sent 
+            to the client instead.
+            <comments>
+            
+            <payload>
+            "playername": client username
+            "json": json or string data
+            <payload>
+
+        """  # noqa
 
         # reject the packet outright .. no chat gets sent to the client
         if payload is False:
@@ -93,6 +243,45 @@ class ParseCB(object):
                                    (data, position))
         return False
 
+    def parse_play_player_poslook(self):
+        """This packet is not actually sent very often.  Maybe on respawns
+        or position corrections."""
+        # CAVEAT - The client and server bound packet formats are different!
+        data = self.packet.readpkt(self.pktCB.PLAYER_POSLOOK[PARSER])
+        relativemarker = data[5]
+        # print("PPLOOK_DATA = ", data, type(data[0]), type(data[1]),
+        #       type(data[2]), type(data[3]), type(data[4]), type(data[5]))
+        # fill player pos if this is absolute position (or a pre 1.8 server)
+        if relativemarker == 0 or self.server.version < PROTOCOL_1_8START:
+            self.client.position = (data[0], data[1], data[2])
+        return True
+
+    def parse_play_use_bed(self):
+        data = self.packet.readpkt([VARINT, POSITION])
+        if data[0] == self.client.server_eid:
+            self.proxy.eventhandler.callevent(
+                "player.usebed",
+                {"playername": self.client.username, "position": data[1]})
+
+            """ eventdoc
+                <group> Proxy <group>
+
+                <description> Sent when server sends client to bedmode.
+                <description>
+
+                <abortable> No - The server thinks the client is in bed already. <abortable>
+
+                <comments>
+                <comments>
+
+                <payload>
+                "playername": client username
+                "position": position of bed
+                <payload>
+
+            """  # noqa
+        return True
+
     def parse_play_join_game(self):
         data = self.packet.readpkt(self.pktCB.JOIN_GAME[PARSER])
 
@@ -100,6 +289,54 @@ class ParseCB(object):
         self.client.gamemode = data[1]
         self.client.dimension = data[2]
         return True
+
+    def parse_play_spawn_position(self):
+        data = self.packet.readpkt([POSITION])
+        self.client.position = data[0]
+        self.proxy.eventhandler.callevent(
+            "player.spawned", {"playername": self.client.username,
+                               "position": data})
+
+        """ eventdoc
+            <group> Proxy <group>
+
+            <description> Sent when server advises the client of its spawn position.
+            <description>
+
+            <abortable> No - Notification only. <abortable>
+
+            <comments>
+            <comments>
+
+            <payload>
+            "playername": client username
+            "position": position
+            <payload>
+
+        """  # noqa
+        return True
+
+    def parse_play_respawn(self):
+        data = self.packet.readpkt([INT, UBYTE, UBYTE, STRING])
+        # "int:dimension|ubyte:difficulty|ubyte:gamemode|level_type:string")
+        self.client.gamemode = data[2]
+        self.client.dimension = data[0]
+        return True
+
+    def parse_play_change_game_state(self):
+        data = self.packet.readpkt([UBYTE, FLOAT])
+        # ("ubyte:reason|float:value")
+        if data[0] == 3:
+            self.client.gamemode = data[1]
+        return True
+
+    def parse_play_disconnect(self):
+        message = self.packet.readpkt([JSON])
+        self.server.close_server("Server kicked %s with PLAY disconnect: %s" %
+                                 (self.client.username, message))
+        # client connection will determine if player needs to be kicked
+        self.server.client.notify_disconnect(message)
+        return False
 
     def parse_play_time_update(self):
         data = self.packet.readpkt([LONG, LONG])
@@ -112,96 +349,57 @@ class ParseCB(object):
             pass
         return True
 
-    def parse_play_spawn_position(self):
-        data = self.packet.readpkt([POSITION])
-        self.client.position = data[0]
-        self.proxy.eventhandler.callevent(
-            "player.spawned", {"playername": self.client.username,
-                               "position": data})
-        '''
-        :decription: When server advises the client of its' (player's)
-         spawn position.
+    # Window processing/ inventory tracking
 
-        :Event: Notification only.
-        '''
+    def parse_play_open_window(self):
+        # This works together with SET_SLOT to maintain
+        #  accurate inventory in wrapper
+        data = self.packet.readpkt(self.pktCB.OPEN_WINDOW[PARSER])
+        self.client.currentwindowid = data[0]
+        self.client.noninventoryslotcount = data[3]
         return True
 
-    def parse_play_respawn(self):
-        data = self.packet.readpkt([INT, UBYTE, UBYTE, STRING])
-        # "int:dimension|ubyte:difficulty|ubyte:gamemode|level_type:string")
-        self.client.gamemode = data[2]
-        self.client.dimension = data[0]
-        return True
+    def parse_play_set_slot(self):
+        # ("byte:wid|short:slot|slot:data")
+        data = self.packet.readpkt(self.pktCB.SET_SLOT[PARSER])
+        # todo - not sure how we  are dealing with slot counts
+        # inventoryslots = 35
+        # inventoryslots = 36  # 1.9 minecraft with shield / other hand
 
-    def parse_play_player_poslook(self):
-        # CAVEAT - The client and server bound packet formats are different!
-        # < 1.8
-        relativemarker = 0
-        if self.server.version < PROTOCOL_1_8START:
-            data = self.packet.readpkt(
-                [DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BOOL])
-            relativemarker = data[5]  # TODO ?? just a guess. check wiki
-        # = 1.8
-        elif PROTOCOL_1_7_9 < self.server.version < PROTOCOL_1_9START:
-            data = self.packet.readpkt(
-                [DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BYTE])
-            relativemarker = data[5] & 1
-        # >= 1.9 (to 1.12 currently)
-        elif PROTOCOL_1_9START < self.server.version < PROTOCOL_MAX:
-            data = self.packet.readpkt(
-                [DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BYTE, VARINT])
-            relativemarker = data[5] & 1
-        else:
-            # This can't really happen...
+        # this is only sent on startup when server sends WID = 0 with 45/46
+        # tems and when an item is moved into players inventory from
+        # outside (like a chest or picking something up) After this, these
+        # are sent on chest opens and so forth, each WID incrementing
+        # by +1 per object opened.  The slot numbers that correspond to
+        # player's hotbar will depend on what window is opened...  the
+        # last 10 (for 1.9) or last 9 (for 1.8 and earlier) will be the
+        # player hotbar ALWAYS. to know how many packets and slots total
+        # to expect, we have to parse server-bound pktCB.OPEN_WINDOW.
+
+        if data[0] == 0:
+            self.client.inventory[data[1]] = data[2]
+
+        if data[0] < 0:
             return True
 
-        # not a bad idea to fill player position if this is absolute position
-        if relativemarker < 1:
-            self.client.position = (data[0], data[1], data[2])
+        # This part updates our inventory from additional
+        #  windows the player may open
+        if data[0] == self.client.currentwindowid:
+            currentslot = data[1]
+
+            # noinspection PyUnusedLocal
+            slotdata = data[2]  # TODO nothing is done with slot data
+
+            if currentslot >= self.client.noninventoryslotcount:
+                # any number of slot above the
+                # pktCB.OPEN_WINDOW declared self.(..)slotcount
+                # is an inventory slot for us to update.
+                self.client.inventory[
+                    currentslot - self.client.noninventoryslotcount + 9
+                ] = data[2]
         return True
 
-    def parse_play_use_bed(self):
-        data = self.packet.readpkt([VARINT, POSITION])
-        if data[0] == self.client.server_eid:
-            self.proxy.eventhandler.callevent(
-                "player.usebed",
-                {"playername": self.client.username, "position": data[1]})
-            '''
-            :decription: When server sends client to bed mode.
-
-            :Event: Notification only.
-            '''
-        return True
-
-    def parse_play_spawn_player(self):  # embedded UUID -must parse.
-        # This packet  is used to spawn other players into a player
-        # client's world.  if this packet does not arrive, the other
-        #  player(s) will not be visible to the client
-        if self.server.version < PROTOCOL_1_8START:
-            dt = self.packet.readpkt([VARINT, STRING, REST])
-        else:
-            dt = self.packet.readpkt([VARINT, UUID, REST])
-        # 1.7.6 "varint:eid|string:uuid|rest:metadt")
-        # 1.8 "varint:eid|uuid:uuid|int:x|int:y|int:z|byte:yaw|
-        #     byte:pitch|short:item|rest:metadt")
-        # 1.9 "varint:eid|uuid:uuid|int:x|int:y|int:z|byte:yaw|
-        #     yte:pitch|rest:metadt")
-
-        # We dont need to read the whole thing.
-        clientserverid = self.proxy.getclientbyofflineserveruuid(dt[1])
-        if clientserverid.uuid:
-            if self.server.version < PROTOCOL_1_8START:
-                self.client.packet.sendpkt(
-                    self.pktCB.SPAWN_PLAYER,
-                    [VARINT, STRING, RAW],
-                    (dt[0], str(clientserverid.uuid), dt[2]))
-            else:
-                self.client.packet.sendpkt(
-                    self.pktCB.SPAWN_PLAYER,
-                    [VARINT, UUID, RAW],
-                    (dt[0], clientserverid.uuid, dt[2]))
-            return False
-        return True
+    # Entity processing sections.  Needed to track entities and EIDs
 
     def parse_play_spawn_object(self):
         # objects are entities and are GC-ed by detroy entities packet
@@ -306,16 +504,15 @@ class ParseCB(object):
         return True
 
     def parse_play_attach_entity(self):
+        if not self.ent_control:
+            return True
         data = []
         leash = True  # False to detach
         if self.server.version < PROTOCOL_1_8START:
             data = self.packet.readpkt([INT, INT, BOOL])
             leash = data[2]
-        if PROTOCOL_1_8START <= self.server.version < PROTOCOL_1_9START:
-            data = self.packet.readpkt([VARINT, VARINT, BOOL])
-            leash = data[2]
         if self.server.version >= PROTOCOL_1_9START:
-            data = self.packet.readpkt([VARINT, VARINT])
+            data = self.packet.readpkt([INT, INT])
             if data[1] == -1:
                 leash = False
         entityeid = data[0]  # rider, leash holder, etc
@@ -327,23 +524,52 @@ class ParseCB(object):
                     "entity.unmount", {"playername": self.client.username,
                                        "vehicle_id": vehormobeid,
                                        "leash": leash})
-                '''
-                :decription: When player attaches to entity.
+                """ eventdoc
+                    <group> Proxy <group>
 
-                :Event: Notification only.
-                '''
-                self.log.debug("player unmount called for %s", self.client.username)
+                    <description> Sent when player attaches to entity.
+                    <description>
+
+                    <abortable> No - Notification only. <abortable>
+
+                    <comments> Only works if entity controls are enabled.  Entity controls
+                    add significant load to wrapper's packet parsing and is off by default.
+                    <comments>
+
+                    <payload>
+                    "playername": client username
+                    "vehicle_id": EID of vehicle or MOB
+                    "leash": leash True/False
+                    <payload>
+
+                """  # noqa
+                self.log.debug("player unmount called for %s",
+                               self.client.username)
                 self.client.riding = None
             else:
                 self.proxy.eventhandler.callevent(
                     "entity.mount", {"playername": self.client.username,
                                      "vehicle_id": vehormobeid,
                                      "leash": leash})
-                '''
-                :decription: When player detaches/unmounts entity.
+                """ eventdoc
+                    <group> Proxy <group>
 
-                :Event: Notification only.
-                '''
+                    <description> Sent when player detaches/unmounts entity.
+                    <description>
+
+                    <abortable> No - Notification only. <abortable>
+
+                    <comments> Only works if entity controls are enabled.  Entity controls
+                    add significant load to wrapper's packet parsing and is off by default.
+                    <comments>
+
+                    <payload>
+                    "playername": client username
+                    "vehicle_id": EID of vehicle or MOB
+                    "leash": leash True/False
+                    <payload>
+
+                """  # noqa
                 self.client.riding = vehormobeid
                 self.log.debug("player mount called for %s on eid %s",
                                self.client.username, vehormobeid)
@@ -382,318 +608,3 @@ class ParseCB(object):
                 self.ent_control.entities.pop(eid, None)
 
         return True
-
-    def parse_play_map_chunk_bulk(self):  # (packet no longer exists in 1.9)
-        # if PROTOCOL_1_9START > self.version > PROTOCOL_1_8START:
-        #     data = self.packet.readpkt([BOOL, VARINT])
-        #     chunks = data[1]
-        #     skylightbool = data[0]
-        #     # ("bool:skylight|varint:chunks")
-        #     for chunk in xxrange(chunks):
-        #         meta = self.packet.readpkt([INT, INT, _USHORT])
-        #         # ("int:x|int:z|ushort:primary")
-        #         primary = meta[2]
-        #         bitmask = bin(primary)[2:].zfill(16)
-        #         chunkcolumn = bytearray()
-        #         for bit in bitmask:
-        #             if bit == "1":
-        #                 # packetanisc
-        #                 chunkcolumn += bytearray(self.packet.read_data(
-        # 16 * 16 * 16 * 2))
-        #                 if self.client.dimension == 0:
-        #                     metalight = bytearray(self.packet.read_data(
-        # 16 * 16 * 16))
-        #                 if skylightbool:
-        #                     skylight = bytearray(self.packet.read_data(
-        # 16 * 16 * 16))
-        #             else:
-        #                 # Null Chunk
-        #                 chunkcolumn += bytearray(16 * 16 * 16 * 2)
-        return True
-
-    def parse_play_change_game_state(self):
-        data = self.packet.readpkt([UBYTE, FLOAT])
-        # ("ubyte:reason|float:value")
-        if data[0] == 3:
-            self.client.gamemode = data[1]
-        return True
-
-    def parse_play_open_window(self):
-        # This works together with SET_SLOT to maintain
-        #  accurate inventory in wrapper
-        if self.server.version < PROTOCOL_1_8START:
-            parsing = [UBYTE, UBYTE, STRING, UBYTE]
-        else:
-            parsing = [UBYTE, STRING, JSON, UBYTE]
-        data = self.packet.readpkt(parsing)
-        self.client.currentwindowid = data[0]
-        self.client.noninventoryslotcount = data[3]
-        return True
-
-    def parse_play_set_slot(self):
-        # ("byte:wid|short:slot|slot:data")
-        data = [-12, -12, None]
-
-        # todo - not sure how we  are dealing with slot counts
-        # inventoryslots = 35
-        if self.server.version < PROTOCOL_1_8START:
-            data = self.packet.readpkt([BYTE, SHORT, SLOT_NO_NBT])
-            # inventoryslots = 35
-        elif self.server.version < PROTOCOL_1_9START:
-            data = self.packet.readpkt([BYTE, SHORT, SLOT])
-            # inventoryslots = 35
-        elif self.server.version > PROTOCOL_1_8END:
-            data = self.packet.readpkt([BYTE, SHORT, SLOT])
-            # inventoryslots = 36  # 1.9 minecraft with shield / other hand
-
-        # this is only sent on startup when server sends WID = 0 with 45/46
-        # tems and when an item is moved into players inventory from
-        # outside (like a chest or picking something up) After this, these
-        # are sent on chest opens and so forth, each WID incrementing
-        # by +1 per object opened.  The slot numbers that correspond to
-        # player's hotbar will depend on what window is opened...  the
-        # last 10 (for 1.9) or last 9 (for 1.8 and earlier) will be the
-        # player hotbar ALWAYS. to know how many packets and slots total
-        # to expect, we have to parse server-bound pktCB.OPEN_WINDOW.
-
-        if data[0] == 0:
-            self.client.inventory[data[1]] = data[2]
-
-        if data[0] < 0:
-            return True
-
-        # This part updates our inventory from additional
-        #  windows the player may open
-        if data[0] == self.client.currentwindowid:
-            currentslot = data[1]
-
-            # noinspection PyUnusedLocal
-            slotdata = data[2]  # TODO nothing is done with slot data
-
-            if currentslot >= self.client.noninventoryslotcount:
-                # any number of slot above the
-                # pktCB.OPEN_WINDOW declared self.(..)slotcount
-                # is an inventory slot for us to update.
-                self.client.inventory[
-                    currentslot - self.client.noninventoryslotcount + 9
-                ] = data[2]
-        return True
-
-    def parse_play_window_items(self):
-        # I am interested to see when this is used and in what versions.
-        #   It appears to be superfluous, as SET_SLOT seems to do the
-        #   purported job nicely.
-        data = self.packet.readpkt([UBYTE, SHORT])
-        windowid = data[0]
-        elementcount = data[1]
-        # data = self.packet.read("byte:wid|short:count")
-        # if data["wid"] == 0:
-        #     for slot in range(1, data["count"]):
-        #         data = self.packet.readpkt("slot:data")
-        #         self.client.inventory[slot] = data["data"]
-        elements = []
-
-        # just parsing for now; not acting on, so OK to skip 1.7.9
-        if self.server.version > PROTOCOL_1_7_9:
-            for _ in xrange(elementcount):
-                elements.append(self.packet.read_slot())
-
-        # noinspection PyUnusedLocal
-        jsondata = {  # todo nothin done with data
-            "windowid": windowid,
-            "elementcount": elementcount,
-            "elements": elements
-        }
-        return True
-
-    def parse_play_entity_properties(self):
-        """ Not sure why I added this.  Based on the wiki, it looked like
-        this might contain a player uuid buried in the lowdata (wiki -
-        "Modifier Data") area that might need to be parsed and reset to
-         the server local uuid.  Thus far, I have not seen it used.
-
-        IF there is a uuid, it may need parsed.
-
-        parser_three = [UUID, DOUBLE, BYTE]
-        if self.version < PROTOCOL_1_8START:
-            parser_one = [INT, INT]
-            parser_two = [STRING, DOUBLE, SHORT]
-            writer_one = self.packet.send_int
-            writer_two = self.packet.send_short
-        else:
-            parser_one = [VARINT, INT]
-            parser_two = [STRING, DOUBLE, VARINT]
-            writer_one = self.packet.send_varint
-            writer_two = self.packet.send_varint
-        raw = b""  # use bytes
-
-        # read first level and repack
-        pass1 = self.packet.readpkt(parser_one)
-        isplayer = self.proxy.getplayerby_eid(pass1[0])
-        if not isplayer:
-            return True
-        raw += writer_one(pass1[0])
-        print(pass1[0], pass1[1])
-        raw += self.packet.send_int(pass1[1])
-
-        # start level 2
-        for _x in range(pass1[1]):
-            pass2 = self.packet.readpkt(parser_two)
-            print(pass2[0], pass2[1], pass2[2])
-            raw += self.packet.send_string(pass2[0])
-            raw += self.packet.send_double(pass2[1])
-            raw += writer_two(pass2[2])
-            print(pass2[2])
-            for _y in range(pass2[2]):
-                lowdata = self.packet.readpkt(parser_three)
-                print(lowdata)
-                packetuuid = lowdata[0]
-                playerclient = self.server.client.proxy.getclientbyofflineserveruuid(
-                    packetuuid)
-                if playerclient:
-                    raw += self.packet.send_uuid(playerclient.uuid.hex)
-                else:
-                    raw += self.packet.send_uuid(lowdata[0])
-                raw += self.packet.send_double(lowdata[1])
-                raw += self.packet.send_byte(lowdata[2])
-                print("Low data: ", lowdata)
-        # self.packet.sendpkt(self.pktCB.ENTITY_PROPERTIES, [RAW], (raw,))
-        return True
-        """
-        return True
-
-    def parse_play_player_list_item(self):
-        if self.server.version >= PROTOCOL_1_8START:
-            head = self.packet.readpkt([VARINT, VARINT])
-            # ("varint:action|varint:length")
-            lenhead = head[1]
-            action = head[0]
-            z = 0
-            while z < lenhead:
-                serveruuid = self.packet.readpkt([UUID])[0]
-                playerclient = self.proxy.getclientbyofflineserveruuid(
-                    serveruuid)
-                if not playerclient:
-                    z += 1
-                    continue
-                try:
-                    # Not sure how could this fail. All clients have a uuid.
-                    uuid = playerclient.uuid
-                except Exception as e:
-                    # uuid = playerclient
-                    self.log.exception("playerclient.uuid failed in "
-                                       "playerlist item (%s)", e)
-                    z += 1
-                    continue
-                z += 1
-                if action == 0:
-                    properties = playerclient.properties
-                    raw = b""
-                    for prop in properties:
-                        raw += self.client.packet.send_string(prop["name"])
-                        raw += self.client.packet.send_string(prop["value"])
-                        if "signature" in prop:
-                            raw += self.client.packet.send_bool(True)
-                            raw += self.client.packet.send_string(
-                                prop["signature"])
-                        else:
-                            raw += self.client.packet.send_bool(False)
-                    raw += self.client.packet.send_varint(0)
-                    raw += self.client.packet.send_varint(0)
-                    raw += self.client.packet.send_bool(False)
-                    self.client.packet.sendpkt(
-                        self.pktCB.PLAYER_LIST_ITEM,
-                        [VARINT, VARINT, UUID, STRING, VARINT, RAW],
-                        (0, 1, playerclient.uuid, playerclient.username,
-                         len(properties), raw))
-
-                elif action == 1:
-                    data = self.packet.readpkt([VARINT])
-
-                    # noinspection PyUnusedLocal
-                    # todo should we be using this to set client gamemode?
-                    gamemode = data[0]
-                    # ("varint:gamemode")
-                    self.client.packet.sendpkt(
-                        self.pktCB.PLAYER_LIST_ITEM,
-                        [VARINT, VARINT, UUID, VARINT],
-                        (1, 1, uuid, data[0]))
-                    # print(1, 1, uuid, gamemode)
-                elif action == 2:
-                    data = self.packet.readpkt([VARINT])
-                    ping = data[0]
-                    # ("varint:ping")
-                    self.client.packet.sendpkt(
-                        self.pktCB.PLAYER_LIST_ITEM,
-                        [VARINT, VARINT, UUID, VARINT],
-                        (2, 1, uuid, ping))
-                elif action == 3:
-                    data = self.packet.readpkt([BOOL])
-                    # ("bool:has_display")
-                    hasdisplay = data[0]
-                    if hasdisplay:
-                        data = self.packet.readpkt([STRING])
-                        displayname = data[0]
-                        # ("string:displayname")
-                        self.client.packet.sendpkt(
-                            self.pktCB.PLAYER_LIST_ITEM,
-                            [VARINT, VARINT, UUID, BOOL, STRING],
-                            (3, 1, uuid, True, displayname))
-
-                    else:
-                        self.client.packet.sendpkt(
-                            self.pktCB.PLAYER_LIST_ITEM,
-                            [VARINT, VARINT, UUID, VARINT],
-                            (3, 1, uuid, False))
-
-                elif action == 4:
-                    self.client.packet.sendpkt(
-                        self.pktCB.PLAYER_LIST_ITEM,
-                        [VARINT, VARINT, UUID],
-                        (4, 1, uuid))
-
-                return False
-        else:  # version < 1.7.9 needs no processing
-            return True
-        return True
-
-    def parse_play_disconnect(self):
-        # def __str__():
-        #    return "PLAY_DISCONNECT"
-        message = self.packet.readpkt([JSON])
-        self.log.info("%s disconnected from Server", self.client.username)
-        self.server.close_server(message)
-
-    def parse_entity_metadata(self):
-        """
-        This packet is parsed, then re-constituted, the original rejected,
-        and a new packet formed to the client. if the entity is a baby,
-        we rename it.. All of this, just for fun! (and as a demo)  Otherwise,
-        this is a pretty useless parse, unless we opt to pump this data
-        into the entity API.
-        """
-        # possible source of errors due to complexity of the parse and
-        # the changes between various versions of minecraft.
-        return True
-        # eid, metadata = self.packet.readpkt(self.pktCB.ENTITY_METADATA[PARSER])
-        # if self.client.version >= PROTOCOL_1_8START:
-        #     # 12 means 'ageable'
-        #     if 12 in metadata:
-        #         # boolean isbaby
-        #         if 6 in metadata[12]:
-        #             # it's a baby!
-        #             if metadata[12][1] is True:
-        #
-        #                 # print the data for reference
-        #                 # see http://wiki.vg/Entities#Entity_Metadata_Format
-        #                 # self.log.debug("EID: %s - %s", eid, metadata)
-        #                 # name the baby and make tag visible (no index/type
-        #                 # checking; accessing base entity class)
-        #                 metadata[2] = (3, "Entity_%s" % eid)
-        #                 metadata[3] = (6, True)
-        #
-        # self.client.packet.sendpkt(
-        #     self.pktCB.ENTITY_METADATA[PKT],
-        #     self.pktCB.ENTITY_METADATA[PARSER],
-        #     (eid, metadata))
-        # return False

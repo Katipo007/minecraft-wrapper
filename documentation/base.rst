@@ -147,7 +147,50 @@
 
 -  blockForEvent(self, eventtype)
 
-        Blocks until the specified event is called. 
+        Blocks until the specified event is called.
+        
+
+-  sendAlerts(self, message, group="wrapper", blocking=False)
+
+        Used to send alerts outside of wrapper (email, for instance).
+
+        :Args:
+            :message: The message to be sent to the servers configured
+             and listed in the wrapper.propertues ["Alerts"]["servers"]
+             list.
+            :group: message will be sent to each of the emails/servers
+             listed that have the matching "group" in
+             wrapper.properties.json["Alerts"]["servers"][<serverindex>]["group"]
+            :blocking: if True, runs non-daemonized and holds up continued
+             wrapper execution until sending is complete.  You would want this
+             set to False normally when dealing with players.  However, at an
+             'onDisable' plugin event, or anywhere else wrapper execution may end
+             abruptly, blocking may be advisble to ensure the emails finish.
+
+        :returns:  None/Nothing
+
+        
+
+-  sendEmail(self, message, recipients, subject, group="wrapper", blocking=False)
+
+        Use group email server settings to email a specified set of recipients
+        (independent of alerts settings or enablement).
+
+        :Args:
+            :message: The message content to be emailed (text/string).
+            :recipients: list of email addresses, type=list (even if only one)
+            :subject: plain text
+            :group: message will be sent using the settings in the matching
+             "group" in wrapper.properties.json["Alerts"]["servers"][<serverindex>]["group"]
+            :blocking: if True, runs non-daemonized and holds up continued
+             wrapper execution until sending is complete.  You would want this
+             set to False normally when dealing with players.  However, at an
+             'onDisable' plugin event, or anywhere else wrapper execution may end
+             abruptly, blocking may be advisble to ensure the emails finish.
+
+        :returns:  None/Nothing
+
+        
 
 -  callEvent(self, event, payload)
 
@@ -182,15 +225,15 @@
 
 -  getStorage(self, name, world=False, formatting="pickle")
 
-        Returns a storage object manager.  The manager contains the
-        storage object, 'Data' (a dictionary). 'Data' contains the
+        Returns a storage object manager.  The manager contains a
+        storage dictionary called 'Data'. 'Data' contains the
         data your plugin will remember across reboots.
 
         :NOTE: This method is somewhat different from previous Wrapper
          versions prior to 0.10.1 (build 182).  The storage object is
          no longer a data object itself; It is a manager used for
          controlling the saving of the object data.  The actual data
-         is contained in Dictionary subitem 'Data'
+         is contained in the property/dictionary variable 'Data'
 
         ___
 
@@ -202,7 +245,7 @@
                 :True: set the storage path to
                  '<serverpath>/<worldname>/plugins'.
 
-            :formatting:  Pickle formatting is the default. pickling is
+            :formatting="pickle":  Pickle formatting is the default. pickling is
              less strict than json formats and leverages binary storage.
              Use of json (or future implemented formats) can result in
              errors if your keys or data do not conform to json standards
@@ -373,4 +416,49 @@
 
         :returns:  nothing
 
+        
+
+-  resetUsers(self)
+
+        resets all user data (removes all permissions from all users).
+
+        :returns:  nothing
+
+        
+
+-  hashPassword(self, password)
+
+        Bcrypt-based password encryption.  Takes a raw string password
+        returns a string representation of the binary hash.
+
+        Bcrypt functions are to be used where ever you are storing a user's
+        password, but do not ever want to be able to "know" their password
+        directly.  We only need to know if the password they supplied is
+        correct or not.
+
+        :Args:
+            :password: The raw string password to be encrypted.
+
+        :returns: a string representation of the encrypted data.  Returns
+         False if bcrypt is not installed on the system.
+
+        
+
+-  checkPassword(self, password, hashed_password)
+
+        Bcrypt-based password checker.  Takes a raw string password and
+        compares it to the hash of a previously hashed password, returning True
+        if the passwords match, or False if not.
+
+        Bcrypt functions are to be used where ever you are storing a user's
+        password, but do not ever want to be able to "know" their password
+        directly.  We only need to know if the password they supplied is
+        correct or not.
+
+        :Args:
+            :password: The raw string password to be checked.
+            :hashed_password: a previously stored hash.
+
+        :returns: Boolean result of the comparison.  Returns
+         False if bcrypt is not installed on the system.
         

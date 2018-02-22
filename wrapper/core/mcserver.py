@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright (C) 2016, 2017 - BenBaptist and Wrapper.py developer(s).
+# Copyright (C) 2016 - 2018 - BenBaptist and Wrapper.py developer(s).
 # https://github.com/benbaptist/minecraft-wrapper
 # This program is distributed under the terms of the GNU
 # General Public License, version 3 or later.
@@ -23,6 +23,7 @@ import json
 import ctypes
 import platform
 import base64
+import copy
 
 try:
     import resource
@@ -49,10 +50,8 @@ class MCServer(object):
         self.reboot_message = self.config["Misc"]["reboot-message"]
         self.restart_message = self.config["Misc"]["default-restart-message"]
 
-        self.reboot_minutes = self.config[
-            "General"]["timed-reboot-minutes"]
-        self.reboot_warning_minutes = self.config[
-            "General"]["timed-reboot-warning-minutes"]
+        self.reboot_minutes = self.config["General"]["timed-reboot-minutes"]
+        self.reboot_warn_minutes = self.config["General"]["timed-reboot-warning-minutes"]  # noqa
 
         # These will be used to auto-detect the number of prepend
         # items in the server output.
@@ -73,13 +72,11 @@ class MCServer(object):
         if "ServerStarted" not in self.wrapper.storage:
             self._toggle_server_started(False)
 
-        self.bootTime = time.time()
         # False/True - whether server will attempt boot
         self.boot_server = self.wrapper.storage["ServerStarted"]
         # whether a stopped server tries rebooting
         self.server_autorestart = self.config["General"]["auto-restart"]
         self.proc = None
-        self.rebootWarnings = 0
         self.lastsizepoll = 0
         self.console_output_data = []
 
@@ -96,7 +93,6 @@ class MCServer(object):
                 " running. To start the server, run /start.")
 
         # Server Information
-        self.worldSize = 0
         self.world = None
 
         # get OPs
@@ -110,10 +106,20 @@ class MCServer(object):
         # don't reg. an unused event.  The timer still is running, we
         #  just have not cluttered the events holder with another
         #  registration item.
-        if self.config["General"]["timed-reboot"] or self.config[
-                "Web"]["web-enabled"]:
-            self.api.registerEvent("timer.second", self.eachsecond)
 
+        if self.config["General"]["timed-reboot"]:
+            rb = threading.Thread(target=self.reboot_timer, args=())
+            rb.daemon = True
+            rb.start()
+
+        if self.config["Web"]["web-enabled"]:
+            wb = threading.Thread(target=self.eachsecond_web, args=())
+            wb.daemon = True
+            wb.start()
+
+        # This event is used to allow proxy to make console commands via
+        # callevent() without referencing mcserver.py code (the eventhandler
+        # is passed as an argument to the proxy).
         self.api.registerEvent("proxy.console", self._console_event)
 
     def init(self):
@@ -171,15 +177,9 @@ class MCServer(object):
             self.log.info("Starting server...")
             self.reloadproperties()
 
-            # stuff I was trying to get colorized output to come through
-            # for non-vanilla servers.
-            command = '-fdiagnostics-color=always'
-            self.args.append(command)
-            command2 = self.args
-            # print("args:\n%s\n" % command2)
-
+            command = self.args
             self.proc = subprocess.Popen(
-                command2, cwd=self.vitals.serverpath, stdout=subprocess.PIPE,
+                command, cwd=self.vitals.serverpath, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, stdin=subprocess.PIPE,
                 universal_newlines=True)
             self.wrapper.players = {}
@@ -240,24 +240,54 @@ class MCServer(object):
 
     def restart(self, reason=""):
         """Restart the Minecraft server, and kick people with the
-        specified reason
+        specified reason.  If server was already stopped, restart it.
         """
         if reason == "":
             reason = self.restart_message
+
         if self.vitals.state in (STOPPING, OFF):
-            self.log.warning(
-                "The server is not already running... Just use '/start'.")
+            self.start()
             return
+        self.doserversaving()
         self.stop(reason)
+
+    def kick_players(self, reasontext):
+        playerlist = copy.copy(self.vitals.players)
+        for player in playerlist:
+            self.kick_player(player, reasontext)
+
+    def kick_player(self, player, reasontext):
+        if self.wrapper.proxymode:
+            try:
+                playerclient = self.vitals.players[player].getClient()
+                playerclient.disconnect(reasontext)
+            except AttributeError:
+                self.log.warning(
+                    "Proxy kick failed - Gould not get client %s.\n"
+                    "I'll try using the console..", player)
+                self.console("kick %s %s" % (player, reasontext))
+            except KeyError:
+                self.log.warning(
+                    "Kick failed - No proxy player called %s", player)
+            except Exception as e:
+                self.log.warning(
+                    "Kick failed - something else went wrong:"
+                    " %s\n%s\n%s", player, e,)
+        else:
+            self.console("kick %s %s" % (player, reasontext))
+            # this sleep is here for Spigot McBans reasons/compatibility.
+            time.sleep(2)
 
     def stop(self, reason="", restart_the_server=True):
         """Stop the Minecraft server from an automatic process.  Allow
         it to restart by default.
         """
+        self.doserversaving()
         self.log.info("Stopping Minecraft server with reason: %s", reason)
+
+        self.kick_players(reason)
+
         self.changestate(STOPPING, reason)
-        for player in self.wrapper.players:
-            self.console("kick %s %s" % (player, reason))
         self.console("stop")
 
         # False will allow this loop to run with no server (and
@@ -358,38 +388,58 @@ class MCServer(object):
                 self.console("tellraw %s %s" % (
                     who, processcolorcodes(message)))
 
-    def login(self, username, eid, location):
+    def login(self, username, servereid, position, ipaddr):
         """Called when a player logs in."""
 
         if username not in self.vitals.players:
             self.vitals.players[username] = Player(username, self.wrapper)
-        # store EID if proxy is not fully connected yet.
-        self.vitals.players[username].playereid = eid
-        self.vitals.players[username].loginposition = location
+        # store EID if proxy is not fully connected yet (or is not enabled).
+        self.vitals.players[username].playereid = servereid
+        self.vitals.players[username].loginposition = position
+        if self.vitals.players[username].ipaddress == "127.0.0.0":
+            self.vitals.players[username].ipaddress = ipaddr
 
         if self.wrapper.proxy:
             playerclient = self.vitals.players[username].getClient()
             if playerclient:
-                playerclient.server_eid = eid
-                playerclient.position = location
+                playerclient.server_eid = servereid
+                playerclient.position = position
 
+        # activate backup status
+        self.wrapper.backups.idle = False
         self.wrapper.events.callevent(
             "player.login",
             {"player": self.getplayer(username)})
 
+        """ eventdoc
+            <group> core/mcserver.py <group>
+
+            <description> When player logs into the java MC server.
+            <description>
+
+            <abortable> No <abortable>
+
+            <comments> All events in the core/mcserver.py group are collected
+            from the console output, do not require proxy mode, and 
+            therefore, also, cannot be aborted.
+            <comments>
+
+            <payload>
+            "playername": player name
+            <payload>
+
+        """
+
     def logout(self, players_name):
         """Called when a player logs out."""
 
-        self.wrapper.events.callevent(
-            "player.logout", {"player": self.getplayer(players_name)})
-
-        if self.wrapper.proxy:
-            self.wrapper.proxy.removestaleclients()
-
-        # TODO remove a hub player or not??
         if players_name in self.vitals.players:
             self.vitals.players[players_name].abort = True
+            self.wrapper.events.callevent(
+                "player.logout", {"player": self.getplayer(players_name)})
             del self.vitals.players[players_name]
+        if len(self.vitals.players) == 0:
+            self.wrapper.backups.idle = True
 
     def getplayer(self, username):
         """Returns a player object with the specified name, or
@@ -462,6 +512,25 @@ class MCServer(object):
                 "server.stopping", {"reason": reason})
         self.wrapper.events.callevent(
             "server.state", {"state": state, "reason": reason})
+
+    def doserversaving(self, desiredstate=True):
+        """
+        :param desiredstate: True = turn serversaving on
+                             False = turn serversaving off
+        :return:
+
+        Future expansion to allow config of server saving state glabally in
+        config.  Plan to include a global config option for periodic or
+        continuous server disk saving of the minecraft server.
+
+        """
+        if desiredstate:
+            self.console("save-all flush")  # flush argument is required
+            self.console("save-on")
+        else:
+            self.console("save-all flush")  # flush argument is required
+            self.console("save-off")
+        time.sleep(1)
 
     def getservertype(self):
         if "spigot" in self.config["General"]["command"].lower():
@@ -544,7 +613,9 @@ class MCServer(object):
         ops = False
         # (4 = PROTOCOL_1_7 ) - 1.7.6 or greater use ops.json
         if self.vitals.protocolVersion > 4:
-            ops = getjsonfile("ops", self.vitals.serverpath, encodedas=self.encoding)
+            ops = getjsonfile(
+                "ops", self.vitals.serverpath, encodedas=self.encoding
+            )
         if not ops:
             # try for an old "ops.txt" file instead.
             ops = []
@@ -581,10 +652,13 @@ class MCServer(object):
         """Returns allocated memory in bytes. This command
         currently only works for *NIX based systems.
         """
-        if not resource or not os.name == "posix" or self.proc is None:
+        if not resource or not os.name == "posix":
             raise OSError(
                 "Your current OS (%s) does not support"
                 " this command at this time." % os.name)
+        if self.proc is None:
+            self.log.debug("There is no running server to getmemoryusage().")
+            return 0
         try:
             with open("/proc/%d/statm" % self.proc.pid) as f:
                 getbytes = int(f.read().split(" ")[1]) * resource.getpagesize()
@@ -609,6 +683,9 @@ class MCServer(object):
 
     @staticmethod
     def stripspecial(text):
+        # not sure what this is actually removing...
+        # this must be legacy code of some kind
+        pass
         a = ""
         it = iter(range(len(text)))
         for i in it:
@@ -627,9 +704,6 @@ class MCServer(object):
         """Internally-used function that parses a particular
         console line.
         """
-        if not self.wrapper.events.callevent(
-                "server.consoleMessage", {"message": buff}):
-            return False
 
         if len(buff) < 1:
             return
@@ -654,10 +728,10 @@ class MCServer(object):
             release = get_int(getargs(semantics, 0))
             major = get_int(getargs(semantics, 1))
             minor = get_int(getargs(semantics, 2))
-            self.vitals.version_compute = minor + (major * 100) + (release * 10000)
+            self.vitals.version_compute = minor + (major * 100) + (release * 10000)  # noqa
 
             # 1.7.6 (protocol 5) is the cutoff where ops.txt became ops.json
-            if self.vitals.version_compute > 10705 and self.vitals.protocolVersion < 0:
+            if self.vitals.version_compute > 10705 and self.vitals.protocolVersion < 0:  # noqa
                 self.vitals.protocolVersion = 5
                 self.wrapper.api.registerPermission("mc1.7.6", value=True)
             if self.vitals.version_compute < 10702 and self.wrapper.proxymode:
@@ -688,6 +762,10 @@ class MCServer(object):
             new_usage = "player> [-s SUPER-OP] [-o OFFLINE] [-l <level>]"
             message = buff.replace("player>", new_usage)
             buff = message
+        if "/whitelist <on|off" in buff:
+            new_usage = "on|off|list|add|remvove|reload|offline|online>"
+            message = buff.replace("player>", new_usage)
+            buff = message
 
         if "While this makes the game possible to play" in buff:
             prefix = " ".join(buff.split(' ')[:self.prepends_offset])
@@ -696,7 +774,7 @@ class MCServer(object):
                 message = (
                     "%s Since you are running Wrapper in OFFLINE mode, THIS "
                     "COULD BE SERIOUS!\n%s Wrapper is not handling any"
-                    " authenication.\n%s This is only ok if this wrapper "
+                    " authentication.\n%s This is only ok if this wrapper "
                     "is not accessible from either port %s or port %s"
                     " (I.e., this wrapper is a multiworld for a hub server, or"
                     " you are doing your own authorization via a plugin)." % (
@@ -706,12 +784,16 @@ class MCServer(object):
                 message = (
                     "%s Since you are running Wrapper in proxy mode, this"
                     " should be ok because Wrapper is handling the"
-                    " authenication, PROVIDED no one can access port"
+                    " authentication, PROVIDED no one can access port"
                     " %s from outside your network." % (
                         prefix, self.vitals.server_port))
 
             if self.wrapper.proxymode:
                 buff = message
+
+        # read port of server and display proxy port, if applicable
+        if "Starting Minecraft server on" in buff:
+            self.vitals.server_port = get_int(buff.split(':')[-1:][0])
 
         # check for server console spam before printing to wrapper console
         server_spaming = False
@@ -726,18 +808,16 @@ class MCServer(object):
             else:
                 self.queued_lines.append(buff)
 
-        # region server console parsing section
-
-        # read port of server
-        if "Starting Minecraft server" in buff:
-            self.vitals.server_port = get_int(buff.split('on *:')[1])
-
+        first_word = getargs(line_words, 0)
+        second_word = getargs(line_words, 1)
+        # be careful about how these elif's are handled!
         # confirm server start
-        elif "Done (" in buff:
+        if "Done (" in buff:
             self._toggle_server_started()
             self.changestate(STARTED)
             self.log.info("Server started")
-            self.bootTime = time.time()
+            if self.wrapper.proxymode:
+                self.log.info("Proxy listening on *:%s", self.wrapper.proxy.proxy_port)  # noqa
 
         # Getting world name
         elif "Preparing level" in buff:
@@ -745,36 +825,72 @@ class MCServer(object):
             self.world = World(self.vitals.worldname, self)
 
         # Player Message
-        if getargs(line_words, 0)[0] == "<":
-            name = self.stripspecial(getargs(line_words, 0)[1:-1])
+        elif first_word[0] == "<":
+            # get a name out of <name>
+            name = self.stripspecial(first_word[1:-1])
             message = self.stripspecial(getargsafter(line_words, 1))
             original = getargsafter(line_words, 0)
-            self.wrapper.events.callevent("player.message", {
-                "player": self.getplayer(name),
-                "message": message,
-                "original": original
-            })
-
+            playerobj = self.getplayer(name)
+            if playerobj:
+                self.wrapper.events.callevent("player.message", {
+                    "player": self.getplayer(name),
+                    "message": message,
+                    "original": original
+                })
+                """ eventdoc
+                    <group> core/mcserver.py <group>
+    
+                    <description> Player chat scrubbed from the console.
+                    <description>
+    
+                    <abortable> 
+                    <abortable>
+    
+                    <comments>
+                    This event is triggered by console chat which has already been sent. 
+                    This event returns the player object. if used in a string context, 
+                    ("%s") it's repr (self.__str__) is self.username (no need to do 
+                    str(player) or player.username in plugin code).
+                    <comments>
+    
+                    <payload>
+                    "player": playerobject (self.__str__ represents as player.username)
+                    "message": <str> type - what the player said in chat. ('hello everyone')
+                    "original": The original line of text from the console ('<mcplayer> hello everyone`)
+                    <payload>
+    
+                """  # noqa
+            else:
+                self.log.debug("Console has chat from '%s', but wrapper has no "
+                               "known logged-in player object by that name.", name)  # noqa
         # Player Login
-        elif getargs(line_words, 1) == "logged":
-            name = self.stripspecial(
-                getargs(line_words, 0)[0:getargs(line_words, 0).find("[")])
+        elif second_word == "logged":
+            user_desc = first_word.split("[/")
+            name = user_desc[0]
+            ip_addr = user_desc[1].split(":")[0]
             eid = get_int(getargs(line_words, 6))
             locationtext = getargs(buff.split(" ("), 1)[:-1].split(", ")
-            location = get_int(
-                float(locationtext[0])), get_int(
-                float(locationtext[1])), get_int(
-                float(locationtext[2]))
-            self.login(name, eid, location)
+            # spigot versus vanilla
+            # SPIGOT - [12:13:19 INFO]: *******[/] logged in with entity id 123 at ([world]316.86789318152546, 67.12426603789697, -191.9069627257038)  # noqa
+            # VANILLA - [23:24:34] [Server thread/INFO]: *******[/127.0.0.1:47434] logged in with entity id 149 at (46.29907483845001, 63.0, -270.1293488726086)  # noqa
+            if len(locationtext[0].split("]")) > 1:
+                x_c = get_int(float(locationtext[0].split("]")[1]))
+            else:
+                x_c = get_int(float(locationtext[0]))
+            y_c = get_int(float(locationtext[1]))
+            z_c = get_int(float(locationtext[2]))
+            location = x_c, y_c, z_c
+
+            self.login(name, eid, location, ip_addr)
 
         # Player Logout
         elif "lost connection" in buff:
-            name = getargs(line_words, 0)
+            name = first_word
             self.logout(name)
 
         # player action
-        elif getargs(line_words, 0) == "*":
-            name = self.stripspecial(getargs(line_words, 1))
+        elif first_word == "*":
+            name = self.stripspecial(second_word)
             message = self.stripspecial(getargsafter(line_words, 2))
             self.wrapper.events.callevent("player.action", {
                 "player": self.getplayer(name),
@@ -783,7 +899,7 @@ class MCServer(object):
 
         # Player Achievement
         elif "has just earned the achievement" in buff:
-            name = self.stripspecial(getargs(line_words, 0))
+            name = self.stripspecial(first_word)
             achievement = getargsafter(line_words, 6)
             self.wrapper.events.callevent("player.achievement", {
                 "player": name,
@@ -792,12 +908,12 @@ class MCServer(object):
 
         # /say command
         elif getargs(
-                line_words, 0)[0] == "[" and getargs(line_words, 0)[-1] == "]":
+                line_words, 0)[0] == "[" and first_word[-1] == "]":
             if self.getservertype != "vanilla":
                 # Unfortunately, Spigot and Bukkit output things
                 # that conflict with this.
                 return
-            name = self.stripspecial(getargs(line_words, 0)[1:-1])
+            name = self.stripspecial(first_word[1:-1])
             message = self.stripspecial(getargsafter(line_words, 1))
             original = getargsafter(line_words, 0)
             self.wrapper.events.callevent("server.say", {
@@ -807,8 +923,8 @@ class MCServer(object):
             })
 
         # Player Death
-        elif getargs(line_words, 1) in self.deathprefixes:
-            name = self.stripspecial(getargs(line_words, 0))
+        elif second_word in self.deathprefixes:
+            name = self.stripspecial(first_word)
             self.wrapper.events.callevent("player.death", {
                 "player": self.getplayer(name),
                 "death": getargsafter(line_words, 1)
@@ -821,44 +937,109 @@ class MCServer(object):
                 "ticks": get_int(skipping_ticks)
             })
 
-    # mcserver.py onsecond Event Handler
-    def eachsecond(self, payload):
-        if self.config["General"]["timed-reboot"]:
-            if time.time() - self.bootTime > (self.reboot_minutes * 60):
-                if self.config["General"]["timed-reboot-warning-minutes"] > 0:
-                    if self.rebootWarnings <= self.reboot_warning_minutes:
-                        l = (time.time()
-                             - self.bootTime
-                             - self.reboot_minutes * 60)
-                        if l > self.rebootWarnings:
-                            self.rebootWarnings += 1
-                            if int(self.reboot_warning_minutes - l + 1) > 0:
-                                self.broadcast(
-                                    "&cServer will reboot in %d minute(s)!" %
-                                    int(self.reboot_warning_minutes - l + 1))
-                        return
-                self.restart(self.reboot_message)
-                self.bootTime = time.time()
-                self.rebootWarnings = 0
+        # player teleport
+        elif first_word == "Teleported" and getargs(line_words, 2) == "to":
+            playername = second_word
+            playerobj = self.getplayer(playername)
+            playerobj._position = [
+                get_int(float(getargs(line_words, 3).split(",")[0])),
+                get_int(float(getargs(line_words, 4).split(",")[0])),
+                get_int(float(getargs(line_words, 5))), 0, 0
+            ]
+            self.wrapper.events.callevent(
+                "player.teleport",
+                {"player": playerobj})
 
-        # only used by web management module
-        if self.config["Web"]["web-enabled"]:
-            if time.time() - self.lastsizepoll > 120:
-                if self.vitals.worldname is None:
-                    return True
-                self.lastsizepoll = time.time()
-                size = 0
-                # os.scandir not in standard library on early py2.7.x systems
-                for i in os.walk("%s/%s" % (self.vitals.serverpath, self.vitals.worldname)):
-                    for f in os.listdir(i[0]):
-                        size += os.path.getsize(os.path.join(i[0], f))
-                self.worldSize = size
+            """ eventdoc
+                <group> core/mcserver.py <group>
+    
+                <description> When player teleports.
+                <description>
+    
+                <abortable> No <abortable>
+    
+                <comments> driven from console message "Teleported ___ to ....".
+                <comments>
+    
+                <payload>
+                "player": player object
+                <payload>
+    
+            """
+    # mcserver.py onsecond Event Handlers
+    def reboot_timer(self):
+        rb_mins = self.reboot_minutes
+        rb_mins_warn = self.config["General"]["timed-reboot-warning-minutes"]
+        while not self.wrapper.halt.halt:
+            time.sleep(1)
+            timer = rb_mins - rb_mins_warn
+            while self.vitals.state in (STARTED, STARTING):
+                timer -= 1
+                time.sleep(60)
+                if timer > 0:
+                    continue
+                if timer + rb_mins_warn > 0:
+                    if rb_mins_warn + timer > 1:
+                        self.broadcast("&cServer will reboot in %d "
+                                       "minutes!" % (rb_mins_warn + timer))
+                    else:
+                        self.broadcast("&cServer will reboot in %d "
+                                       "minute!" % (rb_mins_warn + timer))
+                        countdown = 59
+                        timer -= 1
+                        while countdown > 0:
+                            time.sleep(1)
+                            countdown -= 1
+                            if countdown == 0:
+                                if self.wrapper.backups_idle():
+                                    self.restart(self.reboot_message)
+                                else:
+                                    self.broadcast(
+                                        "&cBackup in progress. Server reboot "
+                                        "delayed for one minute..")
+                                    countdown = 59
+                            if countdown % 15 == 0:
+                                self.broadcast("&cServer will reboot in %d "
+                                               "seconds" % countdown)
+                            if countdown < 6:
+                                self.broadcast("&cServer will reboot in %d "
+                                               "seconds" % countdown)
+                    continue
+                if self.wrapper.backups_idle():
+                    self.restart(self.reboot_message)
+                else:
+                    self.broadcast(
+                        "&cBackup in progress. Server reboot "
+                        "delayed..")
+                    timer = rb_mins + rb_mins_warn + 1
+
+    def eachsecond_web(self):
+        if time.time() - self.lastsizepoll > 120:
+            if self.vitals.worldname is None:
+                return True
+            self.lastsizepoll = time.time()
+            size = 0
+            # os.scandir not in standard library on early py2.7.x systems
+            for i in os.walk(
+                    "%s/%s" % (self.vitals.serverpath, self.vitals.worldname)
+            ):
+                for f in os.listdir(i[0]):
+                    size += os.path.getsize(os.path.join(i[0], f))
+            self.vitals.worldsize = size
 
     def _console_event(self, payload):
-        # self.api.registerEvent("proxy.console", self._console_event)
+        """This function is used in conjunction with event handlers to
+        permit a proxy object to make a command call to this server."""
 
-        # self.proxy.eventhandler.callevent(
-        #     "proxy.console", {"command": console_command})
+        # make commands pass through the command interface.
+        comm_pay = payload["command"].split(" ")
+        if len(comm_pay) > 1:
+            args = comm_pay[1:]
+        else:
+            args = [""]
+        payload = {"player": self.wrapper.xplayer,
+                   "command": comm_pay[0],
+                   "args": args
+                   }
 
-        command = payload["command"]
-        self.console(command)
+        self.wrapper.commands.playercommand(payload)

@@ -18,15 +18,16 @@ from proxy.packets import mcpackets_sb
 from proxy.packets import mcpackets_cb
 
 from proxy.utils.constants import *
+from proxy.utils.mcuuid import MCUUID
 
 
-# noinspection PyMethodMayBeStatic
+# noinspection PyMethodMayBeStatic,PyBroadException
 class ServerConnection(object):
     def __init__(self, client, ip=None, port=None):
         """
         This class ServerConnection is a "fake" client connecting
         to the server.  It receives "CLIENT BOUND" packets from
-        server, parses them, and forards them on to the client.
+        server, parses them, and sends them on to the client.
 
         ServerConnection receives the parent client as it's argument.
         It receives the proxy instance from the Client.
@@ -52,13 +53,10 @@ class ServerConnection(object):
         self.state = HANDSHAKE
         self.packet = None
         self.parse_cb = None
-        self.buildmode = False
 
         # dictionary of parser packet constants and associated parsing methods
         self.parsers = {}
-
-        self.infos_debug = "(player=%s, IP=%s, Port=%s)" % (
-            self.client.username, self.ip, self.port)
+        self.entity_controls = self.proxy.ent_config["enable-entity-controls"]
         self.version = -1
 
         # self parsers get updated here
@@ -115,41 +113,30 @@ class ServerConnection(object):
         t.daemon = True
         t.start()
 
-    def close_server(self, reason="Disconnected", lobby_return=False):
+    def close_server(self, reason="Disconnected"):
         """
-        :lobby_return: determines whether the client should be
-        aborted too.
-        :return:
+        Client is responsible for closing the server connection and handling
+        lobby states.
         """
 
-        # todo remove this and fix reason code
-        print(reason)
+        self.log.debug("%s called serverconnection.close_server(): %s",
+                       self.client.username, reason)
 
-        if lobby_return:
-            # stop parsing PLAY packets to prevent further "disconnects"
-            self.state = LOBBY
-        self.log.debug("Disconnecting proxy server socket connection."
-                       " %s", self.infos_debug)
-
-        # end 'handle' cleanly
+        # end 'handle' and 'flush_loop' cleanly
         self.abort = True
         time.sleep(0.1)
+
         # noinspection PyBroadException
         try:
             self.server_socket.shutdown(2)
             self.log.debug("Sucessfully closed server socket for"
-                           " %s", self.infos_debug)
-
-        # todo - we need to discover our expected exception
+                           " %s", self.client.username)
         except:
             self.log.debug("Server socket for %s already "
                            "closed", self.infos_debug)
             pass
 
-        if not lobby_return:
-            self.client.abort = True
-
-        # allow packet to be GC'ed
+        # allow packet instance to be Garbage Collected
         self.packet = None
 
     def flush_loop(self):
@@ -161,61 +148,35 @@ class ServerConnection(object):
                                " %s", self.infos_debug)
                 break
             time.sleep(0.01)
-        self.log.debug("server connection flush_loop thread ended."
-                       " %s", self.infos_debug)
+        self.log.debug("%s serverconnection flush_loop thread ended.",
+                       self.client.username)
 
     def handle(self):
         while not self.abort:
             # get packet
             try:
                 pkid, original = self.packet.grabpacket()
-            except EOFError as eof:
-                # This error is often erroneous, see
-                # https://github.com/suresttexas00/minecraft-wrapper/issues/30
-                self.log.debug("%s server Packet EOF"
-                               " (%s)", self.infos_debug, eof)
-                return self._break_handle()
 
-            # Bad file descriptor occurs anytime a socket is closed.
+            # possible connection losses:
+            except EOFError:
+                # This is not a true error, but means the connection closed.
+                return self.close_server("handle EOF")
             except socket.error:
-                self.log.debug("%s Failed to grab packet [SERVER]"
-                               " socket error", self.infos_debug)
-                return self._break_handle()
+                return self.close_server("handle socket.error")
             except Exception as e:
-                # anything that gets here is a bona-fide error we
-                # need to become aware of
-                self.log.debug("%s Failed to grab packet [SERVER]"
-                               " (%s):", self.infos_debug, e)
-                return self._break_handle()
+                return self.close_server(
+                    "handle Exception: %s TRACEBACK: \n%s" % (e, traceback))
 
             # parse it
-            if self.parse(pkid) and self.client.state in (
-                    PLAY, LOBBY):
+            if self.parse(pkid) and self.client.state == PLAY:
                 try:
                     self.client.packet.send_raw(original)
-                    if self.proxy.trace:
-                        self._do_trace(pkid, self.state)
-
                 except Exception as e:
-                    self.log.debug("[SERVER %s] Could not send packet"
-                                   " (%s): (%s): \n%s",
-                                   self.infos_debug, pkid, e, traceback)
-                    return self._break_handle()
-
-    def _do_trace(self, pkid, state):
-        name = str(self.parsers[state][pkid]).split(" ")[0]
-        if pkid not in self.proxy.ignoredCB:
-            self.log.warn("<=CB %s (%s)", hex(pkid), name)
-
-    def _break_handle(self):
-        if self.state == LOBBY:
-            self.log.info("%s is without a server now.", self.client.username)
-            # self.close_server("%s server connection closing..." %
-            #   self.client.username, lobby_return=True)
-        else:
-            self.close_server("%s server connection"
-                              " closing..." % self.client.username)
-        return
+                    return self.close_server(
+                        "handle could not send packet '%s'.  "
+                        "Exception: %s TRACEBACK: \n%s" % (
+                            pkid, e, traceback)
+                    )
 
     def _parse_keep_alive(self):
         data = self.packet.readpkt(
@@ -227,6 +188,7 @@ class ServerConnection(object):
         return False
 
     def _transmit_upstream(self):
+        # TODO this probably needs to be removed.  Wrapper's proxy is fragile/slow enought ATM   # noqa
         """ transmit wrapper channel status info to the server's
          direction to help sync hub/lobby wrappers """
 
@@ -259,6 +221,7 @@ class ServerConnection(object):
         message = self.packet.readpkt([STRING])
         self.log.info("Disconnected from server: %s", message)
         self.close_server(message)
+        self.client.notify_disconnect(message)
         return False
 
     def _parse_login_encr_request(self):
@@ -274,6 +237,8 @@ class ServerConnection(object):
         # (we supplied uuid/name anyway!)
         # noinspection PyUnusedLocal
         data = self.packet.readpkt([STRING, STRING])
+        self.client.local_uuid = MCUUID(data[0])
+        # print("UUID: %s" % self.client.local_uuid)
         return False
 
     def _parse_login_set_compression(self):
@@ -288,25 +253,9 @@ class ServerConnection(object):
         time.sleep(10)
         return  # False
 
-    # Lobby parsers
-    # -----------------------
-    def _parse_lobby_disconnect(self):
-        message = self.packet.readpkt([JSON])
-        self.log.info("%s went back to Hub", self.client.username)
-        self.close_server(message, lobby_return=True)
-
     def parse(self, pkid):
-        try:
+        if pkid in self.parsers[self.state]:
             return self.parsers[self.state][pkid]()
-        except KeyError:
-            self.parsers[self.state][pkid] = self._parse_built
-            if self.buildmode:
-                # some code here to document un-parsed packets?
-                pass
-            return True
-
-    # Do nothing parser
-    def _parse_built(self):
         return True
 
     def _define_parsers(self):
@@ -324,8 +273,6 @@ class ServerConnection(object):
                     self._parse_login_set_compression
             },
             PLAY: {
-                self.pktCB.COMBAT_EVENT:
-                    self.parse_cb.parse_play_combat_event,
                 self.pktCB.KEEP_ALIVE[PKT]:
                     self._parse_keep_alive,
                 self.pktCB.CHAT_MESSAGE[PKT]:
@@ -338,47 +285,36 @@ class ServerConnection(object):
                     self.parse_cb.parse_play_spawn_position,
                 self.pktCB.RESPAWN:
                     self.parse_cb.parse_play_respawn,
-                self.pktCB.PLAYER_POSLOOK:
+                self.pktCB.PLAYER_POSLOOK[PKT]:
                     self.parse_cb.parse_play_player_poslook,
                 self.pktCB.USE_BED:
                     self.parse_cb.parse_play_use_bed,
                 self.pktCB.SPAWN_PLAYER:
                     self.parse_cb.parse_play_spawn_player,
-                self.pktCB.SPAWN_OBJECT:
-                    self.parse_cb.parse_play_spawn_object,
-                self.pktCB.SPAWN_MOB:
-                    self.parse_cb.parse_play_spawn_mob,
-                self.pktCB.ENTITY_RELATIVE_MOVE:
-                    self.parse_cb.parse_play_entity_relative_move,
-                self.pktCB.ENTITY_TELEPORT:
-                    self.parse_cb.parse_play_entity_teleport,
-                self.pktCB.ATTACH_ENTITY:
-                    self.parse_cb.parse_play_attach_entity,
-                self.pktCB.DESTROY_ENTITIES:
-                    self.parse_cb.parse_play_destroy_entities,
-                self.pktCB.MAP_CHUNK_BULK:
-                    self.parse_cb.parse_play_map_chunk_bulk,
                 self.pktCB.CHANGE_GAME_STATE:
                     self.parse_cb.parse_play_change_game_state,
-                self.pktCB.OPEN_WINDOW:
+                self.pktCB.OPEN_WINDOW[PKT]:
                     self.parse_cb.parse_play_open_window,
-                self.pktCB.SET_SLOT:
+
+                self.pktCB.SET_SLOT[PKT]:
                     self.parse_cb.parse_play_set_slot,
-                self.pktCB.WINDOW_ITEMS:
-                    self.parse_cb.parse_play_window_items,
-                self.pktCB.ENTITY_PROPERTIES:
-                    self.parse_cb.parse_play_entity_properties,
                 self.pktCB.PLAYER_LIST_ITEM:
                     self.parse_cb.parse_play_player_list_item,
                 self.pktCB.DISCONNECT:
                     self.parse_cb.parse_play_disconnect,
-                self.pktCB.ENTITY_METADATA[PKT]:
-                    self.parse_cb.parse_entity_metadata,
-                },
-            LOBBY: {
-                self.pktCB.DISCONNECT:
-                    self._parse_lobby_disconnect,
-                self.pktCB.KEEP_ALIVE[PKT]:
-                    self._parse_keep_alive
-            }
+                }
         }
+
+        if self.entity_controls:
+            self.parsers[PLAY][
+                self.pktCB.SPAWN_OBJECT] = self.parse_cb.parse_play_spawn_object
+            self.parsers[PLAY][
+                self.pktCB.SPAWN_MOB] = self.parse_cb.parse_play_spawn_mob
+            self.parsers[PLAY][
+                self.pktCB.ENTITY_RELATIVE_MOVE] = self.parse_cb.parse_play_entity_relative_move  # noqa
+            self.parsers[PLAY][
+                self.pktCB.ENTITY_TELEPORT] = self.parse_cb.parse_play_entity_teleport  # noqa
+            self.parsers[PLAY][
+                self.pktCB.ATTACH_ENTITY] = self.parse_cb.parse_play_attach_entity  # noqa
+            self.parsers[PLAY][
+                self.pktCB.DESTROY_ENTITIES] = self.parse_cb.parse_play_destroy_entities  # noqa

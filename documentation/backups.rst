@@ -61,9 +61,7 @@
         Allow plugin to re-enable disabled backups or enable backups
         during this wrapper session.
 
-        :returns:
-            :True: tar is installed
-            :False: tar is not installed
+        :returns: False if tar is not installed, otherwise, nothing.
 
         
 
@@ -84,5 +82,25 @@
         :arg desired_number: number of desired backups
 
         :returns:
+
+        
+
+-  backupInProgress(self)
+
+        Query the state of automatic backups.  This and `backupIsIdle` are
+        just the same function phrased in opposite manner.
+
+        :returns:  True if a backup is in progress.  Otherwise, if a backup
+         is not running, returns False
+
+        
+
+-  backupIsIdle(self)
+
+        Query the state of automatic backups, asking a boolean representing
+        whether the backups are currently idle.
+
+        :returns:  True if a backup is idle and not running.  Otherwise, if
+         a backup is running, returns False
 
         

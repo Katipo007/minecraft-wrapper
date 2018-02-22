@@ -19,7 +19,6 @@ using 'self.api.helpers'
     ..
 
 
-
 -  config_to_dict_read(filename, filepath)
 
     reads a disk file with '=' lines (like server.properties) and
@@ -49,7 +48,7 @@ using 'self.api.helpers'
 -  format_bytes(number_raw_bytes)
 
     Internal wrapper function that takes number of bytes
-    and converts to Kbtye, MiB, GiB, etc... using 4 most
+    and converts to KiB, MiB, GiB, etc... using 4 most
     significant digits.
 
     :returns: tuple - (string repr of 4 digits, string units)
@@ -58,7 +57,7 @@ using 'self.api.helpers'
 
 -  getargs(arginput, i)
 
-    returns a certain index of argument (without producting an
+    returns a certain index of argument (without producing an
     error if out of range, etc).
 
     :Args:
@@ -95,7 +94,7 @@ using 'self.api.helpers'
     :returns:
         :if successful: a dictionary
         :if unsuccessful:  None/{}
-        :File/directory not found: False
+        :File not found: False (any requested directory would be created)
 
     
 
@@ -147,6 +146,37 @@ using 'self.api.helpers'
     :arg addr: Address to validate.
 
     :returns: True or False
+
+    
+
+-  pickle_load(path, filename)
+
+    Load data from a Pickle file (*.pkl).  Normally the returned data would
+     be a dictionary or other python object.  Used to retrieve data that was
+     previously `pickle_save`d.
+
+    :Args:
+        :path: path to file (no trailing slash)
+        :filename: filename including extension
+
+    :returns: saved data.  (Assumes success; errors will raise exception.)
+
+    
+
+-  pickle_save(path, filename, data, encoding="machine")
+
+    Save data to Pickle file (*.pkl).  Allows saving dictionary or other
+    data in a way that json cannot always be saved due to json formatting
+    rules.
+
+    :Args:
+        :path: path to file (no trailing slash)
+        :filename: filename including *.pkl extension
+        :data: Data to be pickled.
+        :encoding: 'Machine' or 'Human' - determines whether file contents
+         can be viewed in a text editor.
+
+    :returns: Nothing.  Assumes success; errors will raise exception.
 
     
 
@@ -212,9 +242,7 @@ using 'self.api.helpers'
 
     
 
--  readout(commandtext, description, separator=" - ", pad=15,
-            command_text_fg="magenta", command_text_opts=("bold",),
-            description_text_fg="yellow", usereadline=True)
+-  readout(commandtext, description, separator=" - ", pad=15, command_text_fg="magenta", command_text_opts=("bold",), description_text_fg="yellow", usereadline=True)
 
     display console text only with no logging - useful for displaying
     pretty console-only messages.

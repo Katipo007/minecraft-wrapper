@@ -15,7 +15,16 @@ import json
 import time
 import datetime
 import socket
-import urllib
+
+version = sys.version_info
+PY3 = version[0] > 2
+
+if PY3:
+    # noinspection PyPep8Naming
+    import pickle as Pickle
+else:
+    # noinspection PyUnresolvedReferences
+    import cPickle as Pickle
 
 VALID_CODES = list("0123456789abcdefrklmno")
 VALID_COLORS = list("0123456789abcdef")
@@ -198,7 +207,7 @@ def find_in_json(jsonlist, keyname, searchvalue):
 def format_bytes(number_raw_bytes):
     """
     Internal wrapper function that takes number of bytes
-    and converts to Kbtye, MiB, GiB, etc... using 4 most
+    and converts to KiB, MiB, GiB, etc... using 4 most
     significant digits.
 
     :returns: tuple - (string repr of 4 digits, string units)
@@ -224,7 +233,7 @@ def format_bytes(number_raw_bytes):
 
 def getargs(arginput, i):
     """
-    returns a certain index of argument (without producting an
+    returns a certain index of argument (without producing an
     error if out of range, etc).
 
     :Args:
@@ -268,7 +277,7 @@ def getjsonfile(filename, directory=".", encodedas="UTF-8"):
     :returns:
         :if successful: a dictionary
         :if unsuccessful:  None/{}
-        :File/directory not found: False
+        :File not found: False (any requested directory would be created)
 
     """
     if not os.path.exists(directory):
@@ -375,6 +384,68 @@ def isipv4address(addr):
     return True
 
 
+def pickle_load(path, filename):
+    """
+    Load data from a Pickle file (*.pkl).  Normally the returned data would
+     be a dictionary or other python object.  Used to retrieve data that was
+     previously `pickle_save`d.
+
+    :Args:
+        :path: path to file (no trailing slash)
+        :filename: filename including extension
+
+    :returns: saved data.  (Assumes success; errors will raise exception.)
+
+    """
+    with open("%s/%s" % (path, filename), "rb") as f:
+        return Pickle.load(f)
+
+
+def pickle_save(path, filename, data, encoding="machine"):
+    """
+    Save data to Pickle file (*.pkl).  Allows saving dictionary or other
+    data in a way that json cannot always be saved due to json formatting
+    rules.
+
+    :Args:
+        :path: path to file (no trailing slash)
+        :filename: filename including *.pkl extension
+        :data: Data to be pickled.
+        :encoding: 'Machine' or 'Human' - determines whether file contents
+         can be viewed in a text editor.
+
+    :returns: Nothing.  Assumes success; errors will raise exception.
+
+    """
+    if "human" in encoding.lower():
+        _protocol = 0
+    else:
+        # using something less than HIGHEST allows both Pythons 2/3
+        # to use the files interchangeably.  It should also allow
+        # moving files between machines with different configurations
+        # with fewer issues.
+        #
+        # Python 2 cPickle does not have a DEFAULT_PROTOCOL
+        # constant like Python 3 pickle (else I would just
+        # use the Default (currently 3, I believe).
+        #
+        # This will probably use either 1 or 2 depending on
+        # which python you use.
+        #
+        # We imported either pickle (Py3) or cPickle (Py2) depending
+        # on what wrapper detected.  Both are implemented in C for
+        # speed.
+        #
+        # The MAIN POINT:
+        # I wanted the code to use something better/faster than
+        # Human-readable (unless that is what you specify), while
+        # still permitting some portability of the final files
+        _protocol = Pickle.HIGHEST_PROTOCOL // 2
+
+    with open("%s/%s" % (path, filename), "wb") as f:
+        Pickle.dump(data, f, protocol=_protocol)
+
+
 def processcolorcodes(messagestring):
     """
     Mostly used internally to process old-style color-codes with
@@ -388,8 +459,7 @@ def processcolorcodes(messagestring):
     :returns: Json dumps() string.
 
     """
-    py3 = sys.version_info > (3,)
-    if not py3:
+    if not PY3:
         message = messagestring.encode('ascii', 'ignore')
     else:
         # .encode('ascii', 'ignore')  # encode to bytes
@@ -470,6 +540,7 @@ def processcolorcodes(messagestring):
                 # noinspection PyUnresolvedReferences
                 it.next()
             except AttributeError:
+                # noinspection PyUnresolvedReferences
                 it.__next__()
 
     extras.append({
@@ -481,7 +552,7 @@ def processcolorcodes(messagestring):
         "italic": italic,
         "strikethrough": strikethrough
     })
-    return json.dumps({"text": "", "extra": extras})
+    return json.dumps({"text": "", "extra": extras}, sort_keys=True)
 
 
 def processoldcolorcodes(message):
@@ -563,9 +634,7 @@ def read_timestr(mc_time_string):
 
 
 # Single line required by documentation creator (at this time)
-def readout(commandtext, description, separator=" - ", pad=15,
-            command_text_fg="magenta", command_text_opts=("bold",),
-            description_text_fg="yellow", usereadline=True):
+def readout(commandtext, description, separator=" - ", pad=15, command_text_fg="magenta", command_text_opts=("bold",), description_text_fg="yellow", usereadline=True):  # noqa
     """
     display console text only with no logging - useful for displaying
     pretty console-only messages.
@@ -831,18 +900,8 @@ def _create_chat(
     return [json.dumps(chat)]
 
 
-def get_req(something, request):
-    # This is a private function used by management.web
-    for a in request.split("/")[1:][1].split("?")[1].split("&"):
-        if a[0:a.find("=")] == something:
-            # TODO PY3 unquote not a urllib (py3) method - impacts: Web mode
-            # noinspection PyUnresolvedReferences
-            return urllib.unquote(a[a.find("=") + 1:])
-    return ""
-
-
 def _test():
-
+    # from pprint import pprint
     timecurr = time.time()
     print("Current system time:", timecurr)
     x = epoch_to_timestr(timecurr)
@@ -896,8 +955,11 @@ def _test():
               "clickEvent": {}, "strikethrough": False}
 
     # test chat items
+    print("testing _handle_chat_items")
     assert _handle_chat_items(mydict) == "§f§o§l§khello"
+    print("_handle_chat_items passsed")
 
+    print("testing processcolorcodes")
     newdict = {
         "text": "", "extra": [
             {"obfuscated": False, "underlined": False, "bold": False,
@@ -916,10 +978,20 @@ def _test():
              "text": "there", "strikethrough": False,
              "underlined": False, "italic": False}]}
 
-    assert processcolorcodes('&o&3harro &l&6there') == json.dumps(newdict)
+    print("-------------------------")
+    print(json.dumps(newdict))
+
+    print("-------------------------")
+
+    print(processcolorcodes('&o&3harro &l&6there'))
+    assert processcolorcodes(
+        '&o&3harro &l&6there') == json.dumps(newdict, sort_keys=True)
+
+    print("testing processcolorcodes passed")
     assert chattocolorcodes(newdict) == "§f§f§o§3harro §3§l§6there"
 
     print("assertion tests succeeded.")
+    print(epoch_to_timestr(1501437714))
 
 
 if __name__ == "__main__":

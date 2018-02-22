@@ -1,28 +1,32 @@
 # -*- coding: utf-8 -*-
 
-# Copyright (C) 2016, 2017 - BenBaptist and Wrapper.py developer(s).
+# Copyright (C) 2016 - 2018 - BenBaptist and Wrapper.py developer(s).
 # https://github.com/benbaptist/minecraft-wrapper
 # This program is distributed under the terms of the GNU
 # General Public License, version 3 or later.
+from __future__ import absolute_import
 
+import base64
 import socket
 import threading
 import time
 import json
+import requests
 
+# imports that are still dependent upon wrapper:
 from api.helpers import getjsonfile, putjsonfile, find_in_json
 from api.helpers import epoch_to_timestr, read_timestr
 from api.helpers import isipv4address
+from utils.py23 import py_str
 
 from proxy.utils import mcuuid
 from proxy.entity.entitycontrol import EntityControl
 
+# encryption requires 'cryptography' package.
 try:
-    import requests
-    # noinspection PyUnresolvedReferences
     import proxy.utils.encryption as encryption
 except ImportError:
-    requests = False
+    encryption = False
 
 try:
     from proxy.client.clientconnection import Client
@@ -31,6 +35,11 @@ try:
 except ImportError:
     Client = False
     Packet = False
+
+""" The whole point of what follows was originally intended to 
+support making proxy an independent thing that does not need 
+a wrapper or server instance to function.  Not sure it was a 
+great idea, but... We shall see."""
 
 
 class NullEventHandler(object):
@@ -57,52 +66,6 @@ class HaltSig(object):
     termsignal."""
     def __init__(self):
         self.halt = False
-
-
-class ServerVitals(object):
-    """This class permits sharing of server information between
-    the caller (such as a Wrapper instance) and proxy."""
-    def __init__(self, playerobjects):
-
-        # operational info
-        self.serverpath = ""
-        self.state = 0
-        self.server_port = "25564"
-        self.onlineMode = True
-        self.command_prefix = "/"
-
-        # Shared data structures and run-time
-        self.players = playerobjects
-
-        # TODO - I don't think this is used or needed (same name as proxy.entity_control!)
-        self.entity_control = None
-        # -1 until a player logs on and server sends a time update
-        self.timeofday = -1
-        self.spammy_stuff = ["found nothing", "vehicle of", "Wrong location!",
-                             "Tried to add entity"]
-
-        # PROPOSE
-        self.clients = []
-
-        # owner/op info
-        self.ownernames = {}
-        self.operator_list = []
-
-        # server properties and folder infos
-        self.properties = {}
-        self.worldname = None
-        self.maxPlayers = 20
-        self.motd = None
-        self.serverIcon = None
-
-        # # Version information
-        # -1 until proxy mode checks the server's MOTD on boot
-        self.protocolVersion = -1
-        # this is string name of the version, collected by console output
-        self.version = ""
-        # a comparable number = x0y0z, where x, y, z = release,
-        #  major, minor, of version.
-        self.version_compute = 0
 
 
 class ProxyConfig(object):
@@ -132,19 +95,50 @@ class ProxyConfig(object):
           }
 
 
+"""
+class ServerVitals(object):
+    def __init__(self, playerobjects):
+        self.serverpath = ""
+        self.state = 0
+        self.server_port = "25564"
+        self.onlineMode = True
+        self.command_prefix = "/"
+        self.players = playerobjects
+        self.entity_control = None
+        self.timeofday = -1
+        self.spammy_stuff = ["found nothing", "vehicle of", "Wrong location!",
+                             "Tried to add entity", ]
+        self.clients = []
+        self.ownernames = {}
+        self.operator_list = []
+        self.properties = {}
+        self.worldname = None
+        self.worldsize = 0
+        self.maxplayers = 20
+        self.motd = None
+        self.serverIcon = None
+        self.protocolVersion = -1
+        self.version = ""
+        self.version_compute = 0
+"""
+
+
 class Proxy(object):
     def __init__(self, termsignal, config, servervitals, loginstance,
-                 usercache, eventhandler):
+                 usercache, eventhandler, encoding="utf-8"):
 
+        self.encoding = encoding
         self.srv_data = servervitals
         self.config = config.proxy
         self.ent_config = config.entity
 
-        if not requests and self.config["proxy-enabled"]:
-            raise Exception("You must have requests and pycrypto installed "
-                            "to run the Proxy!")
-
         self.log = loginstance
+        # encryption = False if proxy.utils.encryption does not import
+        if not encryption and self.config["proxy-enabled"]:
+            self.log.error("You must have the package 'cryptography' "
+                           "installed to run the Proxy!")
+            raise ImportError()
+
         self.usercache = usercache
         self.eventhandler = eventhandler
         self.uuids = mcuuid.UUIDS(self.log, self.usercache)
@@ -181,17 +175,8 @@ class Proxy(object):
         self.registered_channels = ["WRAPPER.PY|", "WRAPPER.PY|PING", ]
         self.pinged = False
 
-        # trace variables
-        self.trace = False
-        self.ignoredSB = [0x05, 0x0a, 0x00, 0x0f, 0x1a, 0x0d, 0x0e, 0x10, 0x15,
-                          0x03]
-        self.ignoredCB = [0x23, 0x18, 0x0d, 0x2b, 0x39, 0x1b, 0x30, 0x2d, 0x2e,
-                          0x37, 0x46, 0x45, 0x14, 0x16, 0x20, 0x03, 0x3b, 0x4d,
-                          0x3e, 0x3f, 0x27, 0x35, 0x26, 0x4c, 0x40, 0x00, 0x3d,
-                          0x4b, 0x0b, 0x31, 0x48, 0x1d, 0x21, 0x28]
-
-        self.privateKey = encryption.generate_key_pair()
-        self.publicKey = encryption.encode_public_key(self.privateKey)
+        self.private_key = encryption.generate_private_key_set()
+        self.public_key = encryption.get_public_key_bytes(self.private_key)
 
         self.entity_control = None
 
@@ -247,8 +232,6 @@ class Proxy(object):
             t = threading.Thread(target=client.handle, args=())
             t.daemon = True
             t.start()
-            # self.srv_data.clients.append(client)  # append later (login)
-            self.removestaleclients()
 
         # received self.abort or caller.halt signal...
         self.entity_control._abortep = True
@@ -296,10 +279,10 @@ class Proxy(object):
         attempts = ["Search: %s" % str(uuid)]
         for client in self.srv_data.clients:
             attempts.append("try: client-%s uuid-%s serveruuid-%s name-%s" %
-                            (client, client.uuid.string,
-                             client.serveruuid.string, client.username))
-            if client.serveruuid.string == str(uuid):
-                self.uuidTranslate[uuid] = client.uuid.string
+                            (client, client.online_uuid.string,
+                             client.local_uuid.string, client.username))
+            if client.local_uuid.string == str(uuid):
+                self.uuidTranslate[uuid] = client.online_uuid.string
                 return client
         self.log.debug("getclientbyofflineserveruuid failed: \n %s", attempts)
         self.log.debug("POSSIBLE CLIENTS: \n %s", self.srv_data.clients)
@@ -367,12 +350,18 @@ class Proxy(object):
                                 "source": source,
                                 "expires": expiration,
                                 "reason": reason})
-                if putjsonfile(banlist, "banned-players", self.srv_data.serverpath):
-
-                    console_command = "kick %s Banned: %s" % (name, reason)
+                if putjsonfile(banlist,
+                               "banned-players",
+                               self.srv_data.serverpath):
+                    # this actually is not needed. Commands now handle the kick.
+                    console_command = "kick %s %s" % (name, reason)
                     self.eventhandler.callevent("proxy.console",
                                                 {"command": console_command})
+                    """ eventdoc
 
+                    description> internalfunction <description>
+
+                    """
                     return "Banned %s: %s" % (name, reason)
                 return "Could not write banlist to disk"
         else:
@@ -414,13 +403,18 @@ class Proxy(object):
                                 "source": source,
                                 "expires": expiration,
                                 "reason": reason})
-                if putjsonfile(banlist, "banned-players", self.srv_data.serverpath):
+                if putjsonfile(banlist,
+                               "banned-players",
+                               self.srv_data.serverpath):
                     self.log.info("kicking %s... %s", username, reason)
 
                     console_command = "kick %s Banned: %s" % (username, reason)
                     self.eventhandler.callevent("proxy.console",
                                                 {"command": console_command})
+                    """ eventdoc
+                                            <description> internalfunction <description>
 
+                                        """  # noqa
                     return "Banned %s: %s - %s" % (username, uuid, reason)
                 return "Could not write banlist to disk"
         else:
@@ -467,10 +461,14 @@ class Proxy(object):
                     for client in self.srv_data.clients:
                         if client.ip == str(ipaddress):
 
-                            console_command = "kick %s Your IP is Banned!" % client.username
-                            self.eventhandler.callevent("proxy.console",
-                                                        {"command": console_command})
+                            console_command = "kick %s Your IP is Banned!" % client.username  # noqa
+                            self.eventhandler.callevent(
+                                "proxy.console", {"command": console_command}
+                            )
+                            """ eventdoc
+                                                    <description> internalfunction <description>
 
+                                                """  # noqa
                             banned += "\n%s" % client.username
                     return "Banned ip address: %s\nPlayers kicked as " \
                            "a result:%s" % (ipaddress, banned)
@@ -509,7 +507,9 @@ class Proxy(object):
                 for x in banlist:
                     if x == banrecord:
                         banlist.remove(x)
-                if putjsonfile(banlist, "banned-players", self.srv_data.serverpath):
+                if putjsonfile(banlist,
+                               "banned-players",
+                               self.srv_data.serverpath):
                     name = self.uuids.getusernamebyuuid(str(uuid))
                     return "pardoned %s" % name
                 return "Could not write banlist to disk"
@@ -528,7 +528,9 @@ class Proxy(object):
                 for x in banlist:
                     if x == banrecord:
                         banlist.remove(x)
-                if putjsonfile(banlist, "banned-players", self.srv_data.serverpath):
+                if putjsonfile(banlist,
+                               "banned-players",
+                               self.srv_data.serverpath):
                     return "pardoned %s" % username
                 return "Could not write banlist to disk"
             else:
@@ -591,8 +593,11 @@ class Proxy(object):
             return False
 
         if uuid in self.skinTextures:
-            return self.skinTextures[uuid]
-        skinblob = json.loads(self.skins[uuid].decode("base64"))
+            return py_str(self.skinTextures[uuid], self.encoding)
+
+        textual = base64.b64decode(self.skins[uuid]).decode("utf-8", "ignore")
+        skinblob = json.loads(textual)
+
         # Player has no skin, so set to Alex [fix from #160]
         if "SKIN" not in skinblob["textures"]:
             skinblob["textures"]["SKIN"] = {
@@ -601,8 +606,8 @@ class Proxy(object):
             }
         r = requests.get(skinblob["textures"]["SKIN"]["url"])
         if r.status_code == 200:
-            self.skinTextures[uuid] = r.content.encode("base64")
-            return self.skinTextures[uuid]
+            self.skinTextures[uuid] = base64.b64encode(r.content)
+            return py_str(self.skinTextures[uuid], self.encoding)
         else:
             self.log.warning("Could not fetch skin texture! "
                              "(status code %d)", r.status_code)

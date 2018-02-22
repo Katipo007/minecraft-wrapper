@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright (C) 2016, 2017 - BenBaptist and Wrapper.py developer(s).
+# Copyright (C) 2016 - 2018 - BenBaptist and Wrapper.py developer(s).
 # https://github.com/benbaptist/minecraft-wrapper
 # This program is distributed under the terms of the GNU
 # General Public License, version 3 or later.
@@ -25,7 +25,6 @@ from proxy.packets import mcpackets_cb
 from proxy.utils.constants import *
 
 from proxy.utils.mcuuid import MCUUID
-
 from api.helpers import processcolorcodes
 
 
@@ -37,18 +36,20 @@ class Client(object):
 
         This class Client is a "fake" server, accepting connections
         from clients.  It receives "SERVER BOUND" packets from client,
-        parses them, and forards them on to the server.
+        parses them, and forards them on to the server.  It "sends" to the
+        client (self.send() or self.sendpkt())
 
         Client receives the parent proxy as it's argument.
-        Accordingly, it receives the proxy's wrapper instance.
+        No longer receives the proxy's wrapper instance!  All
+        data is passed via servervitals from proxy's srv_data.
         """
 
         # basic __init__ items from passed arguments
         self.client_socket = clientsock
         self.client_address = client_addr
         self.proxy = proxy
-        self.publicKey = self.proxy.publicKey
-        self.privateKey = self.proxy.privateKey
+        self.public_key = self.proxy.public_key
+        self.private_key = self.proxy.private_key
         self.servervitals = self.proxy.srv_data
 
         self.log = self.proxy.log
@@ -57,11 +58,11 @@ class Client(object):
         # constants from config:
         self.spigot_mode = self.proxy.config["spigot-mode"]
         self.hidden_ops = self.proxy.config["hidden-ops"]
+        self.silent_bans = self.proxy.config["silent-ipban"]
 
         # client setup and operating paramenters
         self.username = "PING REQUEST"
         self.packet = Packet(self.client_socket, self)
-        self.parse_sb = ParseSB(self, self.packet)
         self.verifyToken = encryption.generate_challenge_token()
         self.serverID = encryption.generate_server_id().encode('utf-8')
         self.MOTD = {}
@@ -75,6 +76,7 @@ class Client(object):
         # packet stuff
         self.pktSB = mcpackets_sb.Packets(self.clientversion)
         self.pktCB = mcpackets_cb.Packets(self.clientversion)
+        self.parse_sb = ParseSB(self, self.packet)
 
         # dictionary of parser packet constants and associated parsing methods
         self.parsers = {}
@@ -91,14 +93,17 @@ class Client(object):
         # Proxy ServerConnection() (not the javaserver)
         self.server_connection = None
         self.state = HANDSHAKE
+        self.permit_disconnect_from_server = False
 
         # UUIDs - all should use MCUUID unless otherwise specified
+
         # --------------------------------------------------------
         # Server UUID - which is the local offline UUID.
-        self.serveruuid = None
+        self.local_uuid = None
+
         # --------------------------------------------------------
         # The client UUID authenticated by connection to session server.
-        self.uuid = None
+        self.online_uuid = None
         # --------------------------------------------------------
         # the formal, unique, mojang UUID as looked up on mojang servers.
         # This ID will be the same no matter what mode wrapper is in
@@ -106,9 +111,9 @@ class Client(object):
         # to use for all wrapper internal functions for referencing a
         # unique player.
 
-        # TODO - Unused except by plugin channel.  This should be
-        #  integrated better with wrapper's uuid lookups
-        #  and the player API.
+        # TODO - Unused except by plugin channel.
+        # not to be confused with the fact that API player has a property
+        # with the same name.
         self.mojanguuid = None
 
         # information gathered during login or socket connection processes
@@ -139,7 +144,7 @@ class Client(object):
         self.properties = {}
         self.clientSettings = False
         self.clientSettingsSent = False
-        self.skinBlob = {}
+        self.skin_blob = {}
         self.windowCounter = 2
         self.currentwindowid = -1
         self.noninventoryslotcount = 0
@@ -154,6 +159,10 @@ class Client(object):
             "sent": False
         }
 
+    def notify_disconnect(self, message):
+        if self.permit_disconnect_from_server:
+            self.disconnect(message)
+
     def handle(self):
         t = threading.Thread(target=self.flush_loop, args=())
         t.daemon = True
@@ -165,19 +174,24 @@ class Client(object):
             except EOFError:
                 # This is not really an error.. It means the client
                 # is not sending packet stream anymore
-                # self.log.debug("Client Packet stream ended [EOF]"
-                #                " (%s)", self.username)
+                if self.username != "PING REQUEST":
+                    self.log.debug("%s Client Packet stream ended [EOF]",
+                                   self.username)
+                self.abort = True
                 break
             except socket_error:
                 # occurs anytime a socket is closed.
-                # self.log.debug("client proxy Failed to grab packet"
-                #                " [socket_error] (%s)", self.username)
+                if self.username != "PING REQUEST":
+                    self.log.debug("%s Client Proxy Failed to grab packet",
+                                   self.username)
+                self.abort = True
                 break
             except Exception as e:
                 # anything that gets here is a bona-fide error
                 # we need to become aware of
-                self.log.error("Exception: Failed to grab packet "
-                               "[CLIENT (%s)] (%s):", self.username, e)
+                self.log.error("%s Client Exception: Failed to grab packet "
+                               "\n%s", self.username, e)
+                self.abort = True
                 break
 
             # self.parse(pkid)
@@ -185,35 +199,34 @@ class Client(object):
             # send packet if server available and parsing passed.
             # already tested - Python will not attempt eval of
             # self.server_connection.state if self.server_connection is False
-            if self.parse(pkid) and \
-                    self.server_connection and \
-                    self.server_connection.state in (
-                            PLAY, LOBBY):
+
+            if self.parse(pkid) and self.server_connection and \
+                    self.server_connection.state in (PLAY, LOBBY):
 
                 # sending to the server only happens in
                 # PLAY/LOBBY (not IDLE, HANDSHAKE, or LOGIN)
                 # wrapper handles LOGIN/HANDSHAKE with servers (via
                 # self.parse(pkid), which DOES happen in all modes)
                 self.server_connection.packet.send_raw(original)
-                if self.proxy.trace:
-                    self._do_trace(pkid, self.state)
 
-        self.close_server()  # upon self.abort
-
-    def _do_trace(self, pkid, state):
-        name = str(self.parsers[state][pkid]).split(" ")[0]
-        if pkid not in self.proxy.ignoredSB:
-            self.log.debug("SB=> %s (%s)", hex(pkid), name)
+        # sometimes (like during a ping request), a client may never enter PLAY
+        # mode and will never be assigned a server connection...
+        if self.server_connection:
+            self.close_server_instance("Client Handle Ended")  # upon self.abort
 
     def flush_loop(self):
         while not self.abort:
             try:
                 self.packet.flush()
             except socket_error:
-                self.log.debug("client socket closed (socket_error).")
+                self.log.debug("%s client socket closed (socket_error).",
+                               self.username)
                 break
             time.sleep(0.01)
-        # self.log.debug("client connection flush_loop thread ended")
+        if self.username != "PING REQUEST":
+            self.log.debug("%s clientconnection flush_loop thread ended",
+                           self.username)
+        self.proxy.removestaleclients()  # from proxy.srv_data.clients
 
     def change_servers(self, ip=None, port=None):
 
@@ -225,8 +238,8 @@ class Client(object):
         self.state = IDLE
         # keep server from sending disconnects
         self.server_connection.state = IDLE
-        self.server_connection.close_server(
-            reason="Lobbification", lobby_return=True)
+        self.close_server_instance("Lobbification")
+        # lobby_return = True
         time.sleep(1)
 
         # setup for connect
@@ -240,7 +253,7 @@ class Client(object):
         if was_lobby:
             self.log.info("%s's client Returned from remote server:"
                           " (UUID: %s | IP: %s | SecureConnection: %s)",
-                          self.username, self.uuid.string,
+                          self.username, self.online_uuid.string,
                           self.ip, self.onlinemode)
 
             self._add_client()
@@ -286,61 +299,81 @@ class Client(object):
 
         self.state = LOBBY
 
-    def client_logon(self, start_keep_alives=True, ip=None, port=None):
-        """  When the client first logs in to wrapper """
-        self._inittheplayer()  # set up inventory and stuff
+    def logon_client_into_proxy(self):
+        """  When the client first logs in to the wrapper proxy """
 
-        if self.proxy.isuuidbanned(self.uuid.__str__()):
+        # check for uuid ban
+        if self.proxy.isuuidbanned(self.online_uuid.string):
             banreason = self.proxy.getuuidbanreason(
-                self.uuid.__str__())
+                self.online_uuid.string)  # changed from __str__()
             self.log.info("Banned player %s tried to"
                           " connect:\n %s" % (self.username, banreason))
             self.state = HANDSHAKE
             self.disconnect("Banned: %s" % banreason)
-            return False
+            return
 
         # Run the pre-login event
         if not self.proxy.eventhandler.callevent(
                 "player.preLogin", {
                     "playername": self.username,
                     "player": self.username,  # not a real player object!
-                    "online_uuid": self.uuid.string,
-                    "offline_uuid": self.serveruuid.string,
+                    "online_uuid": self.online_uuid.string,
+                    "server_uuid": self.local_uuid.string,
                     "ip": self.ip,
                     "secure_connection": self.onlinemode
                 }):
+            """ eventdoc
+                <group> Proxy <group>
+
+                <description> Called before client logs on.
+                <description>
+
+                <abortable> Yes, return False to disconnect the client. <abortable>
+
+                <comments>
+                - If aborted, the client is disconnnected with message 
+                 "Login denied by a Plugin."
+                - Event occurs after proxy ban code runs right after a 
+                 successful handshake with Proxy.
+                <comments>
+                <payload>
+                "playername": self.username,
+                "player": username (name only - player object does not yet exist)
+                "online_uuid": online UUID,
+                "server_uuid": UUID on local server (offline),
+                "ip": the user/client IP on the internet.
+                "secure_connection": Proxy's online mode
+                <payload>
+
+            """  # noqa
 
             self.state = HANDSHAKE
             self.disconnect("Login denied by a Plugin.")
-            return False
-
-        self.log.info("%s's client LOGON occurred: (UUID: %s"
+            return
+        self.permit_disconnect_from_server = True
+        self.log.info("%s's Proxy Client LOGON occurred: (UUID: %s"
                       " | IP: %s | SecureConnection: %s)",
-                      self.username, self.uuid.string,
+                      self.username, self.online_uuid.string,
                       self.ip, self.onlinemode)
-
+        self._inittheplayer()  # set up inventory and stuff
         self._add_client()
 
         # start keep alives
-        if start_keep_alives:
-            # send login success to client (the real client is already
-            # logged in if keep alives are running)
-            self.packet.sendpkt(
-                self.pktCB.LOGIN_SUCCESS,
-                [STRING, STRING],
-                (self.uuid.string, self.username))
 
-            self.time_client_responded = time.time()
+        # send login success to client
+        self.packet.sendpkt(
+            self.pktCB.LOGIN_SUCCESS,
+            [STRING, STRING],
+            (self.online_uuid.string, self.username))
 
-            t_keepalives = threading.Thread(
-                target=self._keep_alive_tracker,
-                kwargs={'playername': self.username})
-            t_keepalives.daemon = True
-            t_keepalives.start()
+        self.time_client_responded = time.time()
 
-        # connect to server
-        self.connect_to_server(ip, port)
-        return False
+        t_keepalives = threading.Thread(
+            target=self._keep_alive_tracker,
+            args=())
+        t_keepalives.daemon = True
+        t_keepalives.start()
+        # self.permit_disconnect_from_server = False
 
     def connect_to_server(self, ip=None, port=None):
         """
@@ -376,7 +409,7 @@ class Client(object):
         server_addr = "localhost"
         if self.spigot_mode:
             server_addr = "localhost\x00%s\x00%s" % \
-                          (self.client_address[0], self.uuid.hex)
+                          (self.client_address[0], self.local_uuid.hex)  # TODO - does this break spigot (using serveruuid versus uuid)?  # noqa
         if self.proxy.forge:
             server_addr = "localhost\x00FML\x00"
 
@@ -395,58 +428,62 @@ class Client(object):
 
         # LOBBY code and such to go elsewhere
 
-    def close_server(self):
-        # close the server connection gracefully first, if possible.
+    def close_server_instance(self, term_message):
+        """ Close the server connection gracefully if possible. """
+        if self.server_connection:
+            self.server_connection.close_server(term_message)
 
-        # noinspection PyBroadException
-        try:
-            self.server_connection.close_server("Client Disconnecting...")
-        except:
-            # self.log.debug("Client socket for %s already"
-            #                " closed!", self.username)
-            pass
-        self.abort = True  # TODO investigate this
-
+    # noinspection PyBroadException
     def disconnect(self, message):
         """
         disconnects the client (runs close_server(), which will
          also shut off the serverconnection.py)
 
-        Not used to disconnect from a server!
+        Not used to disconnect from a server!  This disconnects the client.
         """
-        jsonmessage = message  # server packets are read as json
-
+        jsondict = {"text": "bye"}
         if type(message) is dict:
-            if "text" in message:
-                jsonmessage = {"text": message}
-                if "color" in message:
-                    jsonmessage["color"] = message["color"]
-                if "bold" in message:
-                    jsonmessage["bold"] = message["bold"]
-                message = jsonmessage["text"]
-                jsonmessage = json.dumps(jsonmessage)
-        else:
-            jsonmessage = message  # server packets are read as json
+            jsondict = message
+        elif type(message) is list:
+            if type(message[0]) is dict:
+                jsondict = message[0]
+            if type(message[0]) is str:
+                try:
+                    jsondict = json.loads(message[0])
+                except Exception:  # JSONDecodeError is not defined, so broadexception  # noqa
+                    jsondict = message
+
+        elif type(message) is str:
+                jsonmessage = message  # server packets are read as json
+                try:
+                    jsondict = json.loads(jsonmessage)
+                except Exception:
+                    jsondict = jsonmessage
 
         if self.state in (PLAY, LOBBY):
             self.packet.sendpkt(
                 self.pktCB.DISCONNECT,
                 [JSON],
-                [jsonmessage])
+                [jsondict])
 
-            self.log.debug("upon disconnect, state was PLAY"
-                           " (sent PLAY state DISCONNECT)")
+            self.log.debug("Sent PLAY state DISCONNECT packet to %s",
+                           self.username)
         else:
             self.packet.sendpkt(
                 self.pktCB.LOGIN_DISCONNECT,
                 [JSON],
                 [message])
 
-            self.log.debug("upon disconnect, state was 'other'"
-                           " (sent LOGIN_DISCONNECT)")
+            if self.username != "PING REQUEST":
+                self.log.debug(
+                    "State was 'other': sent LOGIN_DISCONNECT to %s",
+                    self.username)
+
         time.sleep(1)
         self.state = HANDSHAKE
-        self.close_server()
+        self.close_server_instance(
+            "run Disconnect() client.  Aborting client thread")
+        self.abort = True
 
     # internal init and properties
     # -----------------------------
@@ -497,36 +534,54 @@ class Client(object):
                 [POSITION, STRING, STRING, STRING, STRING],
                 (position, line1, line2, line3, line4))
 
-    def chat_to_server(self, string):
+    def chat_to_server(self, message, position=0):
         """ used to resend modified chat packets.  Also to mimic
-        player in API player """
-        self.server_connection.packet.sendpkt(
-            self.pktSB.CHAT_MESSAGE,
-            [STRING],
-            [string])
+        player in API player for say() and execute() methods """
+        if self.version < PROTOCOL_1_11:
+            if len(message) > 100:
+                self.log.error(
+                    "chat to server exceeded 100 characters "
+                    "(%s probably got kicked)", self.username)
+        if len(message) > 256:
+            self.log.error(
+                "chat to server exceeded 256 characters "
+                "(%s probably got kicked)", self.username)
 
-    def chat_to_cleint(self, message):
-        if self.version < PROTOCOL_1_8START:
-            parsing = [STRING, NULL]
-        else:
-            parsing = [JSON, BYTE]
-        self.packet.sendpkt(self.pktCB.CHAT_MESSAGE, parsing, (message, 0))
+        self.server_connection.packet.sendpkt(
+            self.pktSB.CHAT_MESSAGE[PKT], self.pktSB.CHAT_MESSAGE[PARSER],
+            (message, position))
+
+    def chat_to_client(self, message, position=0):
+        """ used by player API to player.message().
+
+        sendpacket for chat knows how to process either a chat dictionary
+        or a string message!
+
+        don't try sending a json.dumps string... it will simply be sent
+        as a chat string inside a chat.message translate item...
+        """
+        self.packet.sendpkt(self.pktCB.CHAT_MESSAGE[PKT],
+                            self.pktCB.CHAT_MESSAGE[PARSER],
+                            (message, position))
 
     # internal client login methods
     # -----------------------------
-    def _keep_alive_tracker(self, playername):
-        # send keep alives to client and send client settings to server.
-        # TODO future - use a plugin channel to see if the client is
-        # actually another wrapper
-
+    def _keep_alive_tracker(self):
+        """ Send keep alives to client and send client settings to server. """
         while not self.abort:
-            time.sleep(1)
+            time.sleep(.1)
             if self.state in (PLAY, LOBBY):
                 # client expects < 20sec
-                if time.time() - self.time_server_pinged > 10:
-
+                # sending more frequently (5 seconds) seems to help with
+                # some slower connections.
+                if time.time() - self.time_server_pinged > 5:
                     # create the keep alive value
-                    self.keepalive_val = random.randrange(0, 99999)
+                    # MC 1.12 .2 uses a time() value.
+                    # Old way takes almost full second to generate:
+                    if self.version < PROTOCOL_1_12_2:
+                        self.keepalive_val = random.randrange(0, 99999)
+                    else:
+                        self.keepalive_val = int((time.time() * 100) % 10000000)
 
                     # challenge the client with it
                     self.packet.sendpkt(
@@ -538,15 +593,14 @@ class Client(object):
 
                 # check for active client keep alive status:
                 # server can allow up to 30 seconds for response
-                if time.time() - self.time_client_responded > 25 \
-                        and not self.abort:
+                if time.time() - self.time_client_responded > 25:  # \
+                        # and not self.abort:
                     self.disconnect("Client closed due to lack of"
                                     " keepalive response")
                     self.log.debug("Closed %s's client thread due to "
-                                   "lack of keepalive response", playername)
+                                   "lack of keepalive response", self.username)
                     return
-        self.log.debug("Client keepalive tracker aborted"
-                       " (%s's client thread)", playername)
+        self.log.debug("%s Client keepalive tracker aborted", self.username)
 
     def _login_authenticate_client(self, server_id):
         if self.onlinemode:
@@ -554,8 +608,19 @@ class Client(object):
                              "/session/minecraft/hasJoined?username=%s"
                              "&serverId=%s" % (self.username, server_id))
             if r.status_code == 200:
+                # {
+                #     "id": "<profile identifier>",
+                #     "name": "<player name>",
+                #     "properties": [
+                #         {
+                #             "name": "textures",
+                #             "value": "<base64 string>",
+                #             "signature": "<base64 string; signed data using Yggdrasil's private key>"  # noqa
+                #         }
+                #     ]
+                # }
                 requestdata = r.json()
-                self.uuid = MCUUID(requestdata["id"])  # TODO
+                self.online_uuid = MCUUID(requestdata["id"])  # TODO
 
                 if requestdata["name"] != self.username:
                     self.disconnect("Client's username did not"
@@ -567,34 +632,37 @@ class Client(object):
 
                 for prop in requestdata["properties"]:
                     if prop["name"] == "textures":
-                        self.skinBlob = prop["value"]
+                        self.skin_blob = prop["value"]
                         self.proxy.skins[
-                            self.uuid.string] = self.skinBlob
+                            self.online_uuid.string] = self.skin_blob
                 self.properties = requestdata["properties"]
             else:
                 self.disconnect("Proxy Client Session Error"
                                 " (HTTP Status Code %d)" % r.status_code)
                 return False
             currentname = self.proxy.uuids.getusernamebyuuid(
-                self.uuid.string)
+                self.online_uuid.string)
             if currentname:
                 if currentname != self.username:
                     self.log.info("%s's client performed LOGON in with"
                                   " new name, falling back to %s",
                                   self.username, currentname)
                     self.username = currentname
-            self.serveruuid = self.proxy.uuids.getuuidfromname(self.username)
+            self.local_uuid = self.proxy.uuids.getuuidfromname(self.username)
+            # print("_login_authenticate_client just changed self.local_uuid to %s" % self.proxy.uuids.getuuidfromname(self.username))  # noqa
+            # TODO "handle name changes better"
 
         # Wrapper offline and not authenticating
         # maybe it is the destination of a hub? or you use another
         # way to authenticate (passwords?)
         else:
             # I'll take your word for it, bub...  You are:
-            self.serveruuid = self.proxy.uuids.getuuidfromname(self.username)
-            self.uuid = self.serveruuid
+            self.local_uuid = self.proxy.uuids.getuuidfromname(self.username)
+            self.online_uuid = self.local_uuid
             self.log.debug("Client logon with wrapper offline-"
-                           " 'self.uuid = OfflinePlayer:<name>'")
+                           " 'self.online_uuid = OfflinePlayer:<name>'")
 
+        # TODO This should follow server properties setting
         # no idea what is special about version 26
         if self.clientversion > 26:
             self.packet.setcompression(256)
@@ -604,12 +672,6 @@ class Client(object):
         #  will be called later by mcserver.py)
         if self not in self.proxy.srv_data.clients:
             self.proxy.srv_data.clients.append(self)
-
-        # if self.username not in self.servervitals.players:
-        #     self.servervitals.players[self.username] = Player(
-        #         self.username, self.wrapper)
-
-        self._inittheplayer()  # set up inventory and stuff
 
     def _send_client_settings(self):
         if self.clientSettings and not self.clientSettingsSent:
@@ -663,60 +725,9 @@ class Client(object):
                     [STRING, BOOL],
                     [channel, state])
 
-    def _whitelist_processing(self):
-        pass
-        # This needs re-worked.  should likely be in main wrapper of server
-        #  instance, not at each client connection
-
-        # Rename UUIDs accordingly
-        # if self.config["Proxy"]["convert-player-files"]:
-        #    if self.config["Proxy"]["online-mode"]:
-        #        # Check player files, and rename them accordingly
-        #        #  to offline-mode UUID
-        #        worldname = self.servervitals.worldname
-        #        if not os.path.exists("%s/playerdata/%s.dat" % (
-        #                worldname, self.serveruuid.string)):
-        #            if os.path.exists("%s/playerdata/%s.dat" % (
-        #                    worldname, self.uuid.string)):
-        #                self.log.info("Migrating %s's playerdata"
-        #                              " file to proxy mode", self.username)
-        #                shutil.move("%s/playerdata/%s.dat" %
-        #                            (worldname, self.uuid.string),
-        #                            "%s/playerdata/%s.dat" % (
-        #                                worldname, self.serveruuid.string))
-        #                with open("%s/.wrapper-proxy-playerdata-migrate" %
-        #                          worldname, "a") as f:
-        #                    f.write("%s %s\n" % (self.uuid.string,
-        #                                         self.serveruuid.string))
-        #        # Change whitelist entries to offline mode versions
-        #        if os.path.exists("whitelist.json"):
-        #            with open("whitelist.json", "r") as f:
-        #                jsonwhitelistdata = json.loads(f.read())
-        #            if jsonwhitelistdata:
-        #                for player in jsonwhitelistdata:
-        #                    if not player["uuid"] == self.serveruuid.string\
-        #                            and player["uuid"] == self.uuid.string:
-        #                        self.log.info("Migrating %s's whitelist entry"
-        #                                      " to proxy mode", self.username)
-        #                        jsonwhitelistdata.append(
-        #                            {"uuid": self.serveruuid.string,
-        #                             "name": self.username})
-        #                        with open("whitelist.json", "w") as f:
-        #                            f.write(json.dumps(jsonwhitelistdata))
-        #                        ##self.XXXservervitalsXXX.console(
-        #                            "##whitelist reload")
-        #                        => self.proxy.eventhandler.callevent("proxy.console", {"command": "whitelist reload"})
-        #                        with open("%s/.wrapper-proxy-whitelist-"
-        #                                  "migrate" % worldname, "a") as f:
-        #                            f.write("%s %s\n" % (
-        #                                self.uuid.string,
-        #                                self.serveruuid.string))
-
-    # PARSERS SECTION
-    # -----------------------------
-
     def _parse_keep_alive(self):
         data = self.packet.readpkt(self.pktSB.KEEP_ALIVE[PARSER])
+
         if data[0] == self.keepalive_val:
             self.time_client_responded = time.time()
         return False
@@ -740,7 +751,7 @@ class Client(object):
             else:
                 datarest = self.packet.readpkt([REST, ])[0]
 
-            print("\nDATA REST = %s\n" % datarest)
+            # print("\nDATA REST = %s\n" % datarest)
             response = json.loads(datarest.decode('utf-8'),
                                   encoding='utf-8')
             self._plugin_response(response)
@@ -748,6 +759,7 @@ class Client(object):
 
         return True
 
+    # Staged for future wrapper plugin channel
     def _plugin_response(self, response):
         if "ip" in response:
             self.shared = {
@@ -883,34 +895,38 @@ class Client(object):
                 self.packet.sendpkt(
                     self.pktCB.LOGIN_ENCR_REQUEST,
                     [STRING, BYTEARRAY_SHORT, BYTEARRAY_SHORT],
-                    (self.serverID, self.publicKey, self.verifyToken))
+                    (self.serverID, self.public_key, self.verifyToken))
             else:
                 # send to client 1.8 +
                 self.packet.sendpkt(
                     self.pktCB.LOGIN_ENCR_REQUEST,
                     [STRING, BYTEARRAY, BYTEARRAY],
-                    (self.serverID, self.publicKey, self.verifyToken))
+                    (self.serverID, self.public_key, self.verifyToken))
 
             # self.log.debug("CB (W)-> LOGIN ENCR REQUEST")
 
             # Server UUID is always offline (at the present time)
             # MCUUID object
-            self.serveruuid = self.proxy.uuids.getuuidfromname(self.username)
+            self.local_uuid = self.proxy.uuids.getuuidfromname(self.username)
 
         else:
-            # Wrapper offline and not authenticating
+            # Wrapper proxy offline and not authenticating
             # maybe it is the destination of a hub? or you use another
             #  way to authenticate (password plugin?)
 
             # Server UUID is always offline (at the present time)
-            self.uuid = self.proxy.uuids.getuuidfromname(self.username)
+            self.online_uuid = self.proxy.uuids.getuuidfromname(self.username)
 
-            # Since wrapper is offline, we are using offline for self.uuid also
-            self.serveruuid = self.uuid  # MCUUID object
+            # Since wrapper is offline, we are using offline for
+            #  self.online_uuid also
+            self.local_uuid = self.online_uuid  # MCUUID object
 
             # log the client on
             self.state = PLAY
-            self.client_logon()
+            self.logon_client_into_proxy()
+            # connect to server
+            self.connect_to_server()
+        return False
 
     def _parse_login_encr_response(self):
         # the client is RESPONDING to our request for
@@ -923,37 +939,39 @@ class Client(object):
         else:
             data = self.packet.readpkt([BYTEARRAY, BYTEARRAY])
 
-        sharedsecret = encryption.decrypt_shared_secret(
-            data[0], self.privateKey)
-        verifytoken = encryption.decrypt_shared_secret(
-            data[1], self.privateKey)
+        sharedsecret = encryption.decrypt_PKCS1v15_shared_data(
+            data[0], self.private_key)
+        verifytoken = encryption.decrypt_PKCS1v15_shared_data(
+            data[1], self.private_key)
         h = hashlib.sha1()
         # self.serverID already encoded
         h.update(self.serverID)
         h.update(sharedsecret)
-        h.update(self.publicKey)
+        h.update(self.public_key)
         serverid = self.packet.hexdigest(h)
 
         # feed info to packet.py for parsing
-        self.packet.sendCipher = encryption.AES128CFB8(sharedsecret)
-        self.packet.recvCipher = encryption.AES128CFB8(sharedsecret)
+        self.packet.sendCipher = encryption.aes128cfb8(sharedsecret).encryptor()
+        self.packet.recvCipher = encryption.aes128cfb8(sharedsecret).decryptor()
 
         # verify correct response
         if not verifytoken == self.verifyToken:
             self.disconnect("Verify tokens are not the same")
             return False
 
-        # determine if IP is banned:
-
-        # client never gets to this point if 'silent-ipban' is enabled
+        # determine if IP is silent banned:
         if self.ipbanned:
             self.log.info("Player %s tried to connect from banned ip:"
                           " %s", self.username, self.ip)
             self.state = HANDSHAKE
-            self.disconnect("Your address is IP-banned from this server!.")
+            if self.silent_bans:
+                self.disconnect("unknown host")
+            else:
+                # self disconnect does not "return" anything.
+                self.disconnect("Your address is IP-banned from this server!.")
             return False
 
-        # begin Client login process
+        # begin Client logon process
         # Wrapper in online mode, taking care of authentication
         if self._login_authenticate_client(serverid) is False:
             return False  # client failed to authenticate
@@ -962,7 +980,11 @@ class Client(object):
 
         # log the client on
         self.state = PLAY
-        self.client_logon()
+        self.logon_client_into_proxy()
+
+        # connect to server
+        self.connect_to_server()
+        return False
 
     # Lobby parsers
     # -----------------------
@@ -987,19 +1009,10 @@ class Client(object):
         return True
 
     def parse(self, pkid):
-        try:
+        if pkid in self.parsers[self.state]:
             return self.parsers[self.state][pkid]()
-        except KeyError:
-            # Add unparsed packetID to the 'Do nothing parser'
-            self.parsers[self.state][pkid] = self._parse_built
-            if self.buildmode:
-                # some code here to document un-parsed packets?
-                pass
+        else:
             return True
-
-    # Do nothing parser
-    def _parse_built(self):
-        return True
 
     def _define_parsers(self):
         # the packets we parse and the methods that parse them.
@@ -1027,22 +1040,16 @@ class Client(object):
                     self._parse_plugin_message,
                 },
             PLAY: {
-                self.pktSB.CHAT_MESSAGE:
+                self.pktSB.CHAT_MESSAGE[PKT]:
                     self.parse_sb.parse_play_chat_message,
                 self.pktSB.CLICK_WINDOW:
                     self.parse_sb.parse_play_click_window,
                 self.pktSB.CLIENT_SETTINGS:
                     self.parse_sb.parse_play_client_settings,
-                self.pktSB.CLIENT_STATUS:
-                    self._parse_built,
                 self.pktSB.HELD_ITEM_CHANGE:
                     self.parse_sb.parse_play_held_item_change,
                 self.pktSB.KEEP_ALIVE[PKT]:
                     self._parse_keep_alive,
-                self.pktSB.PLAYER:
-                    self._parse_built,
-                self.pktSB.PLAYER_ABILITIES:
-                    self._parse_built,
                 self.pktSB.PLAYER_BLOCK_PLACEMENT:
                     self.parse_sb.parse_play_player_block_placement,
                 self.pktSB.PLAYER_DIGGING:
@@ -1051,16 +1058,12 @@ class Client(object):
                     self.parse_sb.parse_play_player_look,
                 self.pktSB.PLAYER_POSITION:
                     self.parse_sb.parse_play_player_position,
-                self.pktSB.PLAYER_POSLOOK:
+                self.pktSB.PLAYER_POSLOOK[PKT]:
                     self.parse_sb.parse_play_player_poslook,
                 self.pktSB.PLAYER_UPDATE_SIGN:
                     self.parse_sb.parse_play_player_update_sign,
                 self.pktSB.SPECTATE:
                     self.parse_sb.parse_play_spectate,
-                self.pktSB.TELEPORT_CONFIRM:
-                    self.parse_sb.parse_play_teleport_confirm,
-                self.pktSB.USE_ENTITY:
-                    self._parse_built,
                 self.pktSB.USE_ITEM:
                     self.parse_sb.parse_play_use_item,
                 self.pktSB.PLUGIN_MESSAGE:
@@ -1069,7 +1072,7 @@ class Client(object):
             LOBBY: {
                 self.pktSB.KEEP_ALIVE[PKT]:
                     self._parse_keep_alive,
-                self.pktSB.CHAT_MESSAGE:
+                self.pktSB.CHAT_MESSAGE[PKT]:
                     self._parse_lobby_chat_message,
                 self.pktSB.PLUGIN_MESSAGE:
                     self._parse_plugin_message,

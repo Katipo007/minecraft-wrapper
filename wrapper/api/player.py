@@ -6,7 +6,6 @@
 # General Public License, version 3 or later.
 
 import time
-import json
 import threading
 
 from proxy.packets.mcpackets_cb import Packets as Packets_cb
@@ -68,6 +67,15 @@ class Player(object):
     upon logging off.  Most features are tied heavily to
     proxy mode implementations and the proxy client instance.
 
+    The player object has a self.__str___ representation that returns the
+    player.username.  Therefore, plugins do not need to attempt string
+    conversion or do explicit references to player.username in their code
+    (str(player) or player.username in plugin code).
+
+    When using events, events in the "proxy" (Group 'Proxy') section are only
+    available in proxy mode.  "server" events (Group 'core/mcserver.py')
+    are available even without proxy mode, as long as the server is running.
+
 
     Supported properties of the player:
     
@@ -78,15 +86,15 @@ class Player(object):
         self.mojangUuid
         self.offlineUuid
         self.loginposition
+        self.playereid
+        self.ipaddress
 
         # proxy only
-        self.ipaddress
         self.serverUuid (proxy only)
         self.clientUuid (proxy only)
         self.clientgameversion
         self.clientboundPackets = Packets_cb(self.clientgameversion)
         self.serverboundPackets = Packets_sb(self.clientgameversion)
-        self.playereid
 
         # some player properties associated with abilities (proxy)
         # default is 1.  Should normally be congruent with speed.
@@ -148,6 +156,7 @@ class Player(object):
 
         self.ipaddress = "127.0.0.0"
         self.loginposition = [0, 0, 0]
+        self._position = [0, 0, 0, 0, 0]  # internally used for non-proxy mode
 
         self.client = None
         self.clientgameversion = self.wrapper.servervitals.protocolVersion
@@ -173,12 +182,12 @@ class Player(object):
                 if client.username == self.username:
                     self.client = client
                     # Both MCUUID objects
-                    self.clientUuid = client.uuid
-                    self.serverUuid = client.serveruuid
+                    self.clientUuid = client.online_uuid
+                    self.serverUuid = client.local_uuid
 
                     self.ipaddress = client.ip
 
-                    # pktSB already set to self.wrapper.servervitals.protocolVersion
+                    # pktSB already set to self.wrapper.servervitals.protocolVersion  # noqa
                     self.clientboundPackets = self.client.pktCB
                     self.clientgameversion = self.client.clientversion
                     gotclient = True
@@ -259,7 +268,8 @@ class Player(object):
         it simply falls back to using the 1.8 'execute' command. To 
         be clear, this does NOT work with any Wrapper.py or plugin 
         commands.  The command does not pass through the wrapper.  
-        It is only sent to the server console.
+        It is only sent to the server console (or the actual server in
+        proxy mode).
 
         :arg string: full command string send on player's behalf to server.
 
@@ -352,28 +362,31 @@ class Player(object):
         """
         Get the players position
         
-        :Note:  The player's position is obtained by parsing client
+        :Proxymode Note:  The player's position is obtained by parsing client
          packets, which are not sent until the client logs in to 
          the server.  Allow some time after server login to verify 
          the wrapper has had the oppportunity to parse a suitable 
          packet to get the information!
+
+        :Non-proxymode note: will still work, but the returned position will
+         be either the player's login position or where he last teleported
+         to...
         
         :returns: a tuple of the player's current position x, y, z, 
          and yaw, pitch of head.
         
         """
-        try:
+        if self.wrapper.proxy:
             return self.client.position + self.client.head
-        except AttributeError:
-            # TODO return a last TP position from console output?
+        else:
             # Non-proxy mode:
-            pass
+            return self._position
 
     def getGamemode(self):
         """
         Get the player's current gamemode.
         
-        :Note:  The player's Gamemode is obtained by parsing client
+        :Proxymode Note:  The player's Gamemode is obtained by parsing client
          packets, which are not sent until the client logs in to 
          the server.  Allow some time after server login to verify 
          the wrapper has had the oppportunity to parse a suitable 
@@ -386,13 +399,13 @@ class Player(object):
             return self.client.gamemode
         except AttributeError:
             # Non-proxy mode:
-            pass
+            return 0
 
     def getDimension(self):
         """
         Get the player's current dimension.
 
-        :Note:  The player's Dimension is obtained by parsing client
+        :Proxymode Note:  The player's Dimension is obtained by parsing client
          packets, which are not sent until the client logs in to 
          the server.  Allow some time after server login to verify 
          the wrapper has had the oppportunity to parse a suitable 
@@ -409,7 +422,7 @@ class Player(object):
             return self.client.dimension
         except AttributeError:
             # Non-proxy mode:
-            pass
+            return 0
 
     def setGamemode(self, gamemode=0):
         """
@@ -429,10 +442,10 @@ class Player(object):
 
     def setResourcePack(self, url, hashrp=""):
         """
-        Sets the player's resource pack to a different URL. If the
-        user hasn't already allowed resource packs, the user will
-        be prompted to change to the specified resource pack.
-        Probably broken right now.
+        :Proxymode: Sets the player's resource pack to a different URL. If the
+         user hasn't already allowed resource packs, the user will
+         be prompted to change to the specified resource pack.
+         Probably broken right now.
 
         :Args:
             :url: URL of resource pack
@@ -495,41 +508,38 @@ class Player(object):
                 return ops["level"]
         return False
 
-    def message(self, message=""):
+    def message(self, message="", position=0):
         """
         Sends a message to the player.
 
-        :arg message: Can be text, colorcoded text, or json chat
+        :Args:
+            :message: Can be text, colorcoded text, or chat dictionary of json.
+            :position:  an integer 0-2.  2 will place it above XP bar.
+             1 or 0 will place it in the chat. Using position 2 will
+             only display any text component (or can be used to display
+             standard minecraft translates, such as
+             "{'translate': 'commands.generic.notFound', 'color': 'red'}" and
+             "{'translate': 'tile.bed.noSleep'}")
+
+
+        :returns: Nothing
+
 
         """
-        if self.javaserver:
+
+        if self.wrapper.proxy:
+            if isinstance(message, dict):
+                sentitem = message
+            else:
+                sentitem = processoldcolorcodes(message)
+
+            self.client.chat_to_client(sentitem, position)
+        else:
             self.javaserver.broadcast(message, who=self.username)
-        else:
-            # TODO message client directly
-            pass
-
-    def actionMessage(self, message=""):
-        try:
-            version = self.wrapper.proxy.srv_data.protocolVersion
-        except AttributeError:
-            # Non proxy mode
-            return False
-
-        if version < PROTOCOL_1_8START:
-            parsing = [_STRING, _NULL]
-            data = [message]
-        else:
-            parsing = [_STRING, _BYTE]
-            data = (json.dumps({"text": processoldcolorcodes(message)}), 2)
-
-        self.client.packet.sendpkt(
-            self.clientboundPackets.CHAT_MESSAGE,
-            parsing,  # "string|byte"
-            data)
 
     def setVisualXP(self, progress, level, total):
         """
-         Change the XP bar on the client's side only. Does not
+        :Proxymode: Change the XP bar on the client's side only. Does not
          affect actual XP levels.
 
         :Args:
@@ -558,9 +568,9 @@ class Player(object):
 
     def openWindow(self, windowtype, title, slots):
         """
-        Opens an inventory window on the client side.  EntityHorse
-        is not supported due to further EID requirement.  *1.8*
-        *experimental only.*
+        :Proxymode: Opens an inventory window on the client side.  EntityHorse
+         is not supported due to further EID requirement.  *1.8*
+         *experimental only.*
 
         :Args:
             :windowtype:  Window Type (text string). See below
@@ -624,7 +634,8 @@ class Player(object):
 
     def setPlayerAbilities(self, fly):
         """
-        *based on old playerSetFly (which was an unfinished function)*
+        :Proxymode: *based on old playerSetFly (which was an unfinished
+         function)*
 
         NOTE - You are implementing these abilities on the client
          side only.. if the player is in survival mode, the server
@@ -691,15 +702,15 @@ class Player(object):
     def sendBlock(self, position, blockid, blockdata, sendblock=True,
                   numparticles=1, partdata=1):
         """
-        Used to make phantom blocks visible ONLY to the client.  Sends
-        either a particle or a block to the minecraft player's client.
-        For blocks iddata is just block id - No need to bitwise the
-        blockdata; just pass the additional block data.  The particle
-        sender is only a basic version and is not intended to do
-        anything more than send something like a barrier particle to
-        temporarily highlight something for the player.  Fancy particle
-        operations should be custom done by the plugin or someone can
-        write a nicer particle-renderer.
+        :Proxymode: Used to make phantom blocks visible ONLY to the client.
+         Sends either a particle or a block to the minecraft player's client.
+         For blocks iddata is just block id - No need to bitwise the
+         blockdata; just pass the additional block data.  The particle
+         sender is only a basic version and is not intended to do
+         anything more than send something like a barrier particle to
+         temporarily highlight something for the player.  Fancy particle
+         operations should be custom done by the plugin or someone can
+         write a nicer particle-renderer.
 
         :Args:
 
@@ -767,7 +778,7 @@ class Player(object):
     # Inventory-related actions.
     def getItemInSlot(self, slot):
         """
-        Returns the item object of an item currently being held.
+        :Proxymode: Returns the item object of an item currently being held.
 
         """
         try:
@@ -788,7 +799,7 @@ class Player(object):
             return False
 
     # Permissions-related
-    def hasPermission(self, node, another_player=False, group_match=True, find_child_groups=True):
+    def hasPermission(self, node, another_player=False, group_match=True, find_child_groups=True):  # noqa
         """
         If the player has the specified permission node (either
         directly, or inherited from a group that the player is in),
@@ -867,6 +878,18 @@ class Player(object):
         return self.wrapper.perms.remove_permission(
             self.mojangUuid.string, node)
 
+    def resetPerms(self, uuid):
+        """
+
+        resets all user data (removes all permissions).
+
+        :arg uuid: The online/mojang uuid (string)
+
+        :returns:  nothing
+
+        """
+        return self.wrapper.perms.fill_user(uuid)
+
     def hasGroup(self, group):
         """
         Returns a boolean of whether or not the player is in
@@ -940,6 +963,8 @@ class Player(object):
     def connect(self, address, port):
         # TODO - WORK IN PROGRESS
         """
+        :Proxymode: Presenty buggy, at best!
+
         Upon calling, the player object will become defunct and
         the client will be transferred to another server or wrapper
         instance (provided it has online-mode turned off).

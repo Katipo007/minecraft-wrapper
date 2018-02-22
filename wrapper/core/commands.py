@@ -4,27 +4,31 @@
 # https://github.com/benbaptist/minecraft-wrapper
 # This program is distributed under the terms of the GNU
 # General Public License, version 3 or later.
+from pprint import pprint
 
-import random
 import time
 import json
 
 from api.helpers import format_bytes, getargs, getargsafter, readout
-from api.helpers import get_int, set_item, putjsonfile
+from api.helpers import get_int, set_item, getjsonfile, putjsonfile
 # noinspection PyProtectedMember
 from api.helpers import _secondstohuman, _showpage
+from utils.crypt import get_passphrase
 
 
-# noinspection PyBroadException
+# noinspection PyBroadException,PyMethodMayBeStatic
 class Commands(object):
 
     def __init__(self, wrapper):
         self.wrapper = wrapper
         self.log = wrapper.log
         self.config = wrapper.config
+        self.config_manager = wrapper.configManager
         self.perms = wrapper.perms
-
+        self.cipher = self.wrapper.cipher
         self.commands = {}
+        self.reset_confirmed = False
+        self.reset_timeout = time.time()
 
     def __getitem__(self, index):
         if not type(index) == str:
@@ -48,70 +52,89 @@ class Commands(object):
 
     def playercommand(self, payload):
         player = payload["player"]
-        commandtext = "/%s %s" % (payload["command"], " ".join(payload["args"]))
+        command = str(payload["command"]).lower()
+        commandtext = "/%s %s" % (command, " ".join(payload["args"]))
         player.message(commandtext)
-        self.log.info("%s executed: %s", payload["player"], commandtext)
+        if command not in ("password", "othersensitivecommand"):
+            self.log.info("%s executed: %s", payload["player"], commandtext)
 
-        # We should get of this by creating a wrapper command registering set
+        # We should get out of this by creating a wrapper command registering set # noqa
 
         # make sure any command returns a True-ish item, or the
         # chat packet will continue to the server
 
-        if str(payload["command"]).lower() in ("plugins", "pl"):
+        if command in ("plugins", "pl"):
             self.command_plugins(player)
             return True
 
-        if str(payload["command"]).lower() == "op":
+        # some minecraft commands (like op, ban, kick) will have implementations
+        # that should vary based on whether proxymode is enabled and are
+        # defined here to supercede the minecraft version.
+        # all commands here override their Minecraft equivalent.
+
+        elif command == "op":
             self.command_op(player, payload)
             return True
 
-        if str(payload["command"]).lower() == "deop":
+        elif command == "deop":
             self.command_deop(player, payload)
             return True
 
-        if payload["command"] == "wrapper":
+        elif command == "kick":
+            self.command_kick(player, payload)
+            return True
+
+        elif command == "whitelist":
+            self.command_whitelist(player, payload)
+            return True
+
+        elif command == "wrapper":
             self.command_wrapper(player, payload)
             return True
 
-        if payload["command"] == "reload":
+        elif command == "reload":
             self.command_reload(player, payload)
             return True
 
-        if payload["command"] in ("help", "?"):
+        elif command in ("help", "?"):
             self.command_help(player, payload)
             return True
 
-        if payload["command"] == "playerstats":
+        elif command == "playerstats":
             self.command_playerstats(player, payload)
             return True
 
-        if payload["command"] in ("permissions", "perm", "perms", "super"):
+        elif command in ("permissions", "perm", "perms", "super"):
             self.command_perms(player, payload)
             return True
 
-        if str(payload["command"]).lower() in ("ent", "entity", "entities"):
+        elif command in ("ent", "entity", "entities"):
             self.command_entities(player, payload)
             return True
 
-        if str(payload["command"]).lower() in (
+        elif command in (
                 "config", "con", "prop", "property", "properties"):
             self.command_setconfig(player, payload)
             return True
 
-        if str(payload["command"]).lower() == "ban":
+        elif self.wrapper.proxymode and command == "ban":
             self.command_banplayer(player, payload)
             return True
 
-        if str(payload["command"]).lower() == "pardon":
+        elif self.wrapper.proxymode and command == "pardon":
             self.command_pardon(player, payload)
             return True
 
-        if str(payload["command"]).lower() == "ban-ip":
+        elif self.wrapper.proxymode and command == "ban-ip":
             self.command_banip(player, payload)
             return True
 
-        if str(payload["command"]).lower() == "pardon-ip":
+        elif self.wrapper.proxymode and command == "pardon-ip":
             self.command_pardonip(player, payload)
+            return True
+
+        elif command == "password":
+            self.command_password(player, payload)
             return True
 
         # This section calls the commands defined by api.registerCommand()
@@ -131,10 +154,9 @@ class Commands(object):
             plugin = self.wrapper.plugins[pluginID]
             if not plugin["good"]:
                 continue
-            commandname = payload["command"]
-            if commandname in self.commands[pluginID]:
+            if command in self.commands[pluginID]:
                 try:
-                    command = self.commands[pluginID][commandname]
+                    command = self.commands[pluginID][command]
                     # require super op to bypass explicit permission
                     if player.hasPermission(
                             command["permission"]) or player.isOp() > 4:
@@ -159,6 +181,24 @@ class Commands(object):
         # return values.  Returning False here will mean no plugin or
         # wrapper command was parsed (so it passes to server).
         return False
+
+    def command_sample(self, player, payload):
+        # just a sample command as a pattern for new commands
+        """
+        :args:
+            :player: is the calling player object, equivalent to
+             payload['player']
+
+            :payload: dictionary of:
+                :args: ["list, "of", "all", "args"]
+                :player: caller player object
+                :command: type:string = the command that was called
+                :playername: - additional argument when run from in-game
+                 (proxy mode)?
+        """
+        if not self._superop(player, 3):
+            return False
+        pprint(payload)
 
     def command_setconfig(self, player, payload):
         # only allowed for console and SuperOP 10
@@ -310,7 +350,7 @@ class Commands(object):
         return returnmessage
 
     def command_entities(self, player, payload):
-        if not player.isOp() > 2:
+        if not self._superop(player, 5):
             player.message("&cPermission Denied")
             return False
 
@@ -375,23 +415,41 @@ class Commands(object):
         if len(getargs(payload["args"], 0)) > 0:
             subcommand = getargs(payload["args"], 0)
             if subcommand == "update":
-                player.message({"text": "Checking for new Wrapper.py updates...", "color": "yellow"})
+                player.message(
+                    {"text": "Checking for new Wrapper.py updates...",
+                     "color": "yellow"}
+                )
                 update = self.wrapper.get_wrapper_update_info()
                 if update:
-                    version, build, repotype = update
-                    player.message("&bNew Wrapper.py Version %s (Build #%d) available!)" %
-                                   (".".join([str(_) for _ in version]), build))
-                    player.message("&bYou are currently on %s." % self.wrapper.getbuildstring())
+                    version, repotype, reponame = update
+                    build = version[4]
+
+                    player.message(
+                        "New Wrapper.py %s version %s is available! (current "
+                        "build is #%s)" % (
+                            repotype, version, self.wrapper.buildinfo.__version__  # noqa
+                        )
+                    )
                     player.message("&aPerforming update...")
                     if self.wrapper.performupdate(version, build, repotype):
-                        player.message("&aUpdate completed! Version %s #%d (%s) is now installed. "
-                                       "Please reboot Wrapper.py to apply changes." % (version, build, repotype))
+                        player.message(
+                            "&aUpdate completed! Version %s #%d (%s) is now "
+                            "installed. Please reboot Wrapper.py to apply "
+                            "changes." % (version, build, repotype)
+                        )
                     else:
-                        player.message("&cAn error occured while performing update.")
-                        player.message("&cPlease check the Wrapper.py console as soon as possible "
-                                       "for an explanation and traceback.")
-                        player.message("&cIf you are unsure of the cause, please file a bug report "
-                                       "on http://github.com/benbaptist/minecraft-wrapper with the traceback.")
+                        player.message(
+                            "&cAn error occured while performing update."
+                        )
+                        player.message(
+                            "&cPlease check the Wrapper.py console as soon as "
+                            "possible for an explanation and traceback."
+                        )
+                        player.message(
+                            "&cIf you are unsure of the cause, please file a "
+                            "bug report on http://github.com/benbaptist/minecra"
+                            "ft-wrapper with the traceback."
+                        )
                 else:
                     player.message("&cNo new Wrapper.py versions available.")
             elif subcommand == "halt":
@@ -401,13 +459,21 @@ class Commands(object):
                 server_bytes = self.wrapper.javaserver.getmemoryusage()
                 if server_bytes:
                     amount, units = format_bytes(server_bytes)
-                    player.message("&cServer Memory: %s %s (%s bytes)" % (amount, units, server_bytes))
+                    player.message(
+                        "&cServer Memory: %s %s (%s bytes)" % (
+                            amount, units, server_bytes
+                        )
+                    )
                 else:
-                    player.message("&cError: Couldn't retrieve memory usage for an unknown reason")
-            elif subcommand == "random":
-                player.message("&cRandom number: &a%d" % random.randrange(0, 99999999))
+                    player.message(
+                        "&cError: Couldn't retrieve memory usage for an "
+                        "unknown reason"
+                    )
         else:
-            player.message({"text": "Wrapper.py Version %s" % buildstring, "color": "gray", "italic": True})
+            player.message(
+                {"text": "Wrapper.py Version %s" % buildstring,
+                 "color": "gray", "italic": True}
+            )
         return
 
     def command_reload(self, player, payload):
@@ -416,6 +482,7 @@ class Commands(object):
             return False
 
         if getargs(payload["args"], 0) == "server":
+            # payload = {"args": ""}
             return
         try:
             self.wrapper.plugins.reloadplugins()
@@ -571,8 +638,8 @@ class Commands(object):
                             "hoverEvent": {
                                 "action": "show_text",
                                 "value": v["description"]
-                        }
-                    },
+                            }
+                        },
                         {
                             "text": "[click help]",
                             "color": "blue",
@@ -591,15 +658,54 @@ class Commands(object):
                         },
                         {
                             "text": " - " + shortdesc
-                    }]
+                        }]
                 })
             _showpage(player, page, items, "help", 8, command_prefix=self.wrapper.servervitals.command_prefix)
         return False
 
+    def command_password(self, player, payload):
+        if not player.isOp() > 4:
+            player.message("&cPermission Denied")
+            return
+        command = getargs(payload["args"], 0)
+
+        def showhelp():
+            player.message("&2Usage: /password <group> <item> <data>")
+            player.message(
+                "&2 in console, use 'prompt' for <data> to be invisibly")
+            player.message(
+                "&2  prompted if there is an 'over the shoulder' concern.")
+            player.message(
+                "&2 Sample usage to change IRC remote control password:")
+            player.message(
+                "&2  /password IRC control-irc-pass NEWsuckypassword")
+
+        if command in ("help", "h", "info", "about"):
+            showhelp()
+            return
+        group = getargs(payload["args"], 0)
+        setting = getargs(payload["args"], 1)
+        data = getargsafter(payload["args"], 2)
+        if data == "prompt":
+            data = get_passphrase("Please enter data to be hashed/stored")
+        if group not in self.config:
+            player.message(
+                "&c wrapper.properties has no such group '%s'" % group)
+            showhelp()
+            return
+        if setting not in self.config[group]:
+            player.message(
+                "&c There is no item '%s' in group '%s'" % (setting, group))
+            return
+        final_data = self.cipher.encrypt(data)
+        player.message("&2 data encrypted!")
+        self.config[group][setting] = final_data
+        self.config_manager.save()
+
     def command_playerstats(self, player, payload):
         if not player.isOp() > 3:
             player.message("&cPermission Denied")
-            return False
+            return
 
         subcommand = getargs(payload["args"], 0)
         totalplaytime = {}
@@ -635,9 +741,129 @@ class Commands(object):
                     break
         return
 
+    def command_kick(self, player, payload):
+        if not self._superop(player, 3):
+            return False
+        player_name = getargs(payload["args"], 0)
+        all_args = getargsafter(payload["args"], 1)
+        if all_args == "":
+            reason = {'translate': 'multiplayer.disconnect.kicked'}
+        else:
+            reason = {'translate': 'multiplayer.disconnect.kicked',
+                      'text': all_args
+            }
+
+        self.wrapper.javaserver.kick_player(player_name, reason)
+
+    def command_whitelist(self, player, payload):
+        if player.isOp() < 3:
+            return False
+        wl_commands = {
+            "add": self._command_whitelist_add,
+            "list": self._command_whitelist_list,
+            "off": self._command_whitelist_off,
+            "on": self._command_whitelist_on,
+            "reload": self._command_whitelist_reload,
+            "remove": self._command_whitelist_remove,
+            "offline": self._command_whitelist_offline,
+            "online": self._command_whitelist_online,
+        }
+        wl_comm = getargs(payload["args"], 0)
+        wl_arg = getargs(payload["args"], 1)
+        if wl_comm in wl_commands:
+            wl_commands[wl_comm](player, wl_arg)
+        else:
+            player.message({'with': [{'translate': 'commands.whitelist.usage'}],
+                            'translate': 'commands.generic.usage',
+                            'color': 'red'})
+
+    def _command_whitelist_add(self, player, arg):
+        if not self.wrapper.proxymode:
+            player.execute("whitelist add %s" % arg)
+            player.message("..Working.  Server may lag.")
+            player.message()
+            return
+        whitelist = getjsonfile(
+            "whitelist", self.wrapper.serverpath, self.wrapper.encoding
+        )
+        online_uuid = self.wrapper.uuids.getuuidbyusername(arg).string
+
+        if online_uuid in (None, False):
+            player.message("&c INVALID NAME")
+            return
+        proper_spelled = self.wrapper.uuids.getusernamebyuuid(online_uuid)
+        off_line = self.wrapper.uuids.getuuidfromname(proper_spelled).string
+
+        add_record = True
+        for index, entry in enumerate(whitelist):
+            # Name is already there; just update uuid
+            if whitelist[index]["name"] == proper_spelled:
+                whitelist[index]["uuid"] = off_line
+                add_record = False
+                break
+            # uuid is correct offline; make sure name matches
+            elif whitelist[index]["uuid"] == off_line:
+                whitelist[index]["name"] = proper_spelled
+                add_record = False
+                break
+            # uuid is online version; correct to offline and edit username
+            elif whitelist[index]["uuid"] == online_uuid:
+                whitelist[index]["uuid"] = off_line
+                whitelist[index]["name"] = proper_spelled
+                add_record = False
+                break
+
+        if add_record:
+            jsonitem = {"uuid": off_line, "name": proper_spelled}
+            whitelist.append(jsonitem)
+
+        putjsonfile(whitelist, "whitelist", self.wrapper.serverpath,)
+        player.message("Done!")
+        player.execute("whitelist reload")
+
+    def _command_whitelist_list(self, player, _arg):
+        player.execute("whitelist list")
+
+    def _command_whitelist_off(self, player, _arg):
+        player.execute("whitelist off")
+
+    def _command_whitelist_on(self, player, _arg):
+        player.execute("whitelist on")
+
+    def _command_whitelist_reload(self, player, _arg):
+        player.execute("whitelist reload")
+
+    def _command_whitelist_remove(self, player, arg):
+        player.execute("whitelist remove %s" % arg)
+        player.execute("whitelist reload")
+
+    def _command_whitelist_offline(self, player, arg):
+        whitelist = getjsonfile(
+            "whitelist", self.wrapper.serverpath, self.wrapper.encoding
+        )
+        for index, entry in enumerate(whitelist):
+            newuuid = self.wrapper.uuids.getuuidfromname(
+                whitelist[index]["name"]).string
+            whitelist[index]["uuid"] = newuuid
+        putjsonfile(whitelist, "whitelist", self.wrapper.serverpath, )
+        player.message("Done!")
+        player.execute("whitelist reload")
+
+    def _command_whitelist_online(self, player, arg):
+        whitelist = getjsonfile(
+            "whitelist", self.wrapper.serverpath, self.wrapper.encoding
+        )
+        for index, entry in enumerate(whitelist):
+            newuuid = self.wrapper.uuids.getuuidbyusername(
+                whitelist[index]["name"]).string
+            whitelist[index]["uuid"] = newuuid
+        putjsonfile(whitelist, "whitelist", self.wrapper.serverpath, )
+        player.message("Done!")
+        player.execute("whitelist reload")
+
     def command_deop(self, player, payload):
-        if player is None:
-            player = self.wrapper.xplayer
+        # if player is None:
+        #    player = self.wrapper.xplayer
         if not self._superop(player, 9):
             return False
         operator_name = getargs(payload["args"], 0)
@@ -663,8 +889,9 @@ class Commands(object):
             return "deop requires a running server instance"
 
     def command_op(self, player, payload):
-        if player is None:
-            player = self.wrapper.xplayer
+        # if player is None:  This is a security vulnerability.  console is
+        # already set to an xplayer
+        #    player = self.wrapper.xplayer
         if not self._superop(player, 9):
             return False
 
@@ -675,9 +902,15 @@ class Commands(object):
         offline_mode = "-o" in flags
 
         new_operator_name = getargs(payload["args"], 0)
+        if new_operator_name == "":
+            player.message({'with': [{'translate': 'commands.op.usage'}],
+                            'translate': 'commands.generic.usage',
+                            'color': 'red'})
+            return
+
         valid_uuid = self.wrapper.uuids.getuuidbyusername(new_operator_name)
 
-        if not offline_mode and valid_uuid is None:
+        if not offline_mode and valid_uuid in (None, False):
             player.message(
                 "&c'%s' is not a valid player name!" % new_operator_name)
             return False
@@ -746,7 +979,31 @@ class Commands(object):
             player.message("&cUsage: /%s %s" % (payload["command"], l))
 
         command = getargs(payload["args"], 0)
-        if command in ("gr", "group", "groups"):
+
+        if command in ("help", "h", "info", "about"):
+            self.reset_confirmed = False
+            subcommand = getargs(payload["args"], 1)
+            if subcommand in ("group", "groups", "gr", "g"):
+                player.message("&2/perms group <groupname> ...")
+                player.message("&2  new/info -create new group / get info")
+                player.message("&2  set <node> <value>  -set a perm for this group")
+                player.message("&2  delete -deletes the group entirely")
+                player.message("&2  remove <node> -just remove a node")
+
+            elif subcommand in ("users", "user", "use", "u"):
+                player.message("&2/perms user <player> ...")
+                player.message("&2  info -display permissions for a player")
+                player.message("&2  group <group> -assign player to <group>")
+                player.message("&2  group <group> remove -remove player from <group>")
+                player.message("&2  set <node> <value>  -set a perm for this player")
+                player.message("&2  remove <node>  -remove perm <node> for this player")
+            else:
+                player.message("&2The primary subcommands are group, user, RESET")
+                player.message("&2Help with groups use: /perms help groups")
+                player.message("&2Help with users use: /perms help users")
+
+        elif command in ("gr", "group", "groups"):
+            self.reset_confirmed = False
             group = getargs(payload["args"], 1)
             subcommand = getargs(payload["args"], 2)
 
@@ -764,9 +1021,10 @@ class Commands(object):
                 call_result = self.perms.group_set_permission(
                     group, node, value)
                 if call_result:
-                    player.message("&aGroup permission set.")
+                    player.message("&aGroup permission %s set to %s.",
+                                   node, value)
                 else:
-                    usage("groups %s set <permissionNode> [value]" % group)
+                    usage("groups %s set <permissionNode> <value>" % group)
 
             elif subcommand == "remove":
                 node = getargs(payload["args"], 3)
@@ -796,9 +1054,11 @@ class Commands(object):
             else:
                 player.message("&6List of groups:&b %s" %
                                ", ".join(self.wrapper.wrapper_permissions.Data["groups"]))
-                usage("groups <groupName> [new|delete] / [set|remove <node>] / [info]")
+                usage("groups <groupName> [new|delete(group)|info]/[set|remove(node) <node> <value>]")
+                player.message("&cTry '/perms help groups' for more info...")
 
         elif command in ("user", "users"):
+            self.reset_confirmed = False
             username = getargs(payload["args"], 1)
             subcommand = getargs(payload["args"], 2)
             uuid = self.wrapper.uuids.getuuidbyusername(username)
@@ -855,9 +1115,23 @@ class Commands(object):
                         player.message("- %s: %s" % (node, value))
             else:
                 usage("users <username> <group/set/remove/info>")
+                player.message("&cTry '/perms help users' for more info...")
 
+        elif command == "RESET":
+            if self.reset_confirmed and ((time.time() - self.reset_timeout) < 30):
+                self.perms.clear_group_data()
+                self.perms.clear_user_data()
+                self.reset_confirmed = False
+                player.message("&cGroup and player permissions have been cleared!")
+            else:
+                self.reset_timeout = time.time()
+                self.reset_confirmed = True
+                player.message("&cARE YOU SURE?")
+                player.message("&cThis will delete all groups and clear all user permissions!")
+                player.message("Confirm your intent by running '/perms RESET' again within 30 seconds.")
         else:
-            usage("<groups/users/RESET> (Note: RESET is case-sensitive!)")
+            self.reset_confirmed = False
+            usage("<help/groups/users/RESET> (Note: RESET is case-sensitive!)")
             player.message("&cAlias commands: /perms, /perm, /super")
         return False
 

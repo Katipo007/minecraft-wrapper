@@ -50,12 +50,12 @@ class Packets(object):
         # -------------------------------
         # 1.7 - 1.7.10 PLAY packets
         self.KEEP_ALIVE = [0x00, [INT]]
-        self.CHAT_MESSAGE = 0x01
+        self.CHAT_MESSAGE = [0x01, [STRING]]  # until 1.11, max string length is 100 or client gets kicked
         self.USE_ENTITY = 0x02
         self.PLAYER = 0x03
         self.PLAYER_POSITION = 0x04
         self.PLAYER_LOOK = 0x05
-        self.PLAYER_POSLOOK = 0x06
+        self.PLAYER_POSLOOK = [0x06, [DOUBLE, DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BOOL]]
         self.PLAYER_DIGGING = 0x07
         self.PLAYER_BLOCK_PLACEMENT = 0x08
         self.HELD_ITEM_CHANGE = 0x09
@@ -92,6 +92,8 @@ class Packets(object):
         # Parsing changes
         if protocol >= PROTOCOL_1_8START:
             self.KEEP_ALIVE[PARSER] = [VARINT]
+            self.PLAYER_POSLOOK = [0x06, [DOUBLE, DOUBLE, DOUBLE, FLOAT,
+                                           FLOAT, BOOL]]
 
         if PROTOCOL_1_9START > protocol >= PROTOCOL_1_8START:
             self.SPECTATE = 0x18
@@ -101,7 +103,7 @@ class Packets(object):
         if protocol >= PROTOCOL_1_9REL1:
             self.TELEPORT_CONFIRM = 0x00
             self.TAB_COMPLETE = 0x01  # TODO NEW
-            self.CHAT_MESSAGE = 0x02
+            self.CHAT_MESSAGE[PKT] = 0x02  # message length increased to 256 at 1.11 (315)
             self.CLIENT_STATUS = 0x03
             self.CLIENT_SETTINGS = 0x04
             self.CONFIRM_TRANSACTION = 0x05  # TODO NEW
@@ -112,7 +114,7 @@ class Packets(object):
             self.USE_ENTITY = 0x0a
             self.KEEP_ALIVE[PKT] = 0x0b
             self.PLAYER_POSITION = 0x0c
-            self.PLAYER_POSLOOK = 0x0d
+            self.PLAYER_POSLOOK[PKT] = 0x0d
             self.PLAYER_LOOK = 0x0e
             self.PLAYER = 0x0f
             self.VEHICLE_MOVE = 0x10  # TODO NEW
@@ -134,7 +136,7 @@ class Packets(object):
             # snapshots raise ValueError, so this is really >= PROTOCOL_1_12
             self.PREPARE_CRAFTING_GRID = 0x01  # TODO NEW 1.12
             self.TAB_COMPLETE = 0x02  # TODO NEW
-            self.CHAT_MESSAGE = 0x03
+            self.CHAT_MESSAGE[PKT] = 0x03
             self.CLIENT_STATUS = 0x04  # open inventory was removed as a status
             self.CLIENT_SETTINGS = 0x05
             self.CONFIRM_TRANSACTION = 0x06  # TODO NEW
@@ -146,7 +148,7 @@ class Packets(object):
             self.KEEP_ALIVE[PKT] = 0x0c
             self.PLAYER = 0x0d
             self.PLAYER_POSITION = 0x0e
-            self.PLAYER_POSLOOK = 0x0f
+            self.PLAYER_POSLOOK[PKT] = 0x0f
             self.PLAYER_LOOK = 0x10
             self.VEHICLE_MOVE = 0x11  # TODO NEW
             self.STEER_BOAT = 0x12  # TODO NEW
@@ -168,7 +170,7 @@ class Packets(object):
         if protocol > PROTOCOL_1_12_1START:
             self.PREPARE_CRAFTING_GRID = 0xee  # replaced by CRAFT_RECIPE_REQUEST
             self.TAB_COMPLETE = 0x01
-            self.CHAT_MESSAGE = 0x02
+            self.CHAT_MESSAGE[PKT] = 0x02
             self.CLIENT_STATUS = 0x03  # open inventory was removed as a status
             self.CLIENT_SETTINGS = 0x04
             self.CONFIRM_TRANSACTION = 0x05  # TODO NEW
@@ -177,11 +179,18 @@ class Packets(object):
             self.CLOSE_WINDOW = 0x08  # TODO NEW
             self.PLUGIN_MESSAGE = 0x09
             self.USE_ENTITY = 0x0a
-            self.KEEP_ALIVE[PKT] = 0x0b
+            self.KEEP_ALIVE = [0x0b, [LONG]]
             self.PLAYER = 0x0c
             self.PLAYER_POSITION = 0x0d
-            self.PLAYER_POSLOOK = 0x0e
+            self.PLAYER_POSLOOK[PKT] = 0x0e
             self.PLAYER_LOOK = 0x0f
             self.VEHICLE_MOVE = 0x10  # TODO NEW
             self.STEER_BOAT = 0x11  # TODO NEW
             self.CRAFT_RECIPE_REQUEST = 0x12
+
+            # Parsing changes
+            # self.KEEP_ALIVE[PARSER] = [LONG]
+
+            # New Notes:
+            # - Client status has new notes relevant to respawns
+            # - Block placement has more precise info about placement

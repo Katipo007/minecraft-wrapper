@@ -18,21 +18,28 @@ class ParseSB(object):
         self.proxy = client.proxy
         self.log = client.log
         self.packet = packet
+        self.pktSB = self.client.pktSB
 
         self.command_prefix = self.proxy.srv_data.command_prefix
         self.command_prefix_non_standard = self.command_prefix != "/"
         self.command_prefix_len = len(self.command_prefix)
 
     def parse_play_player_poslook(self):  # player position and look
-        if self.client.clientversion < PROTOCOL_1_8START:
-            data = self.packet.readpkt(
-                [DOUBLE, DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BOOL])
+        """decided to use this one solely for tracking the client position"""
+
+        # DOUBLE, DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BOOL - 1.7 - 1.7.10
+        # ("double:x|double:feety|double:heady|double:z|float:yaw|float:pitch|bool:on_ground")
+
+        # DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BOOL - 1.8 and up
+        # ("double:x|double:feety|double:z|float:yaw|float:pitch|bool:on_ground")
+
+        data = self.packet.readpkt(self.pktSB.PLAYER_POSLOOK[PARSER])
+        if self.client.clientversion > PROTOCOL_1_8START:
+            self.client.position = (data[0], data[1], data[2])
+            self.client.head = (data[3], data[4])
         else:
-            data = self.packet.readpkt(
-                [DOUBLE, DOUBLE, DOUBLE, FLOAT, FLOAT, BOOL])
-        # ("double:x|double:y|double:z|float:yaw|float:pitch|bool:on_ground")
-        self.client.position = (data[0], data[1], data[2])
-        self.client.head = (data[4], data[5])
+            self.client.position = (data[0], data[1], data[3])
+            self.client.head = (data[4], data[5])
         return True
 
     def parse_play_chat_message(self):
@@ -61,9 +68,13 @@ class ParseSB(object):
             passing to server.  'chatmsg' accepts both raw string
             or a dictionary payload containing ["message"] item.
             <comments>
-
+            <payload>
+            "player": player's name
+            "message": the chat message string.
+            <payload>
 
         """
+
         # This part allows the player plugin event "player.rawMessage" to...
         if payload is False:
             return False  # ..reject the packet (by returning False)
@@ -97,12 +108,18 @@ class ParseSB(object):
                     for registering commands.
                     <description>
 
-                    <abortable> Registered commands ARE aborted... <abortable>
+                    <abortable> Yes. Registered commands ARE already aborted since they do not get passed to the server.
+                    <abortable>
 
                     <comments>
-                    Called AFTER player.rawMessage event if rawMessage
-                    does not reject it.  However, rawMessage could have
+                    Called AFTER player.rawMessage event (if rawMessage
+                    does not reject it).  However, rawMessage could have
                     modified it before this point.
+                    
+                    The best use of this event is a quick way to prevent a client from 
+                    passing certain commands or command arguments to the server.
+                    rawMessage is better if you need something else (parsing or
+                    filtering chat, for example).
                     <comments>
 
                     <payload>
@@ -136,12 +153,6 @@ class ParseSB(object):
         self.client.position = (data[0], data[1], data[3])
         return True
 
-    def parse_play_teleport_confirm(self):
-        # don't interfere with this and self.pktSB.PLAYER_POSLOOK...
-        # doing so will glitch the client
-        # data = self.packet.readpkt([VARINT])
-        return True
-
     def parse_play_player_look(self):
         data = self.packet.readpkt([FLOAT, FLOAT, BOOL])
         # ("float:yaw|float:pitch|bool:on_ground")
@@ -173,7 +184,33 @@ class ParseSB(object):
                 "face": data[4]
             }):
                 return False  # stop packet if  player.dig returns False
+            """ eventdoc
+                        <group> Proxy <group>
 
+                        <description> When a player attempts to dig.  This event
+                        only supports starting and finishing a dig.
+                        <description>
+
+                        <abortable> Yes <abortable>
+
+                        <comments>
+                        Can be aborted by returning False. Note that the client
+                        may still believe the block is broken (or being broken).
+                        If you intend to abort the dig, it should be done at
+                        "begin_break". Sending a false bedrock to the client's 
+                        digging position will help prevent the client from 
+                        sending "end_break"
+                        
+                        <comments>
+
+                        <payload>
+                        "playername": playername (not the player object!)
+                        "position": x, y, z block position
+                        "action": begin_break or end_break (string)
+                        "face": 0-5 (bottom, top, north, south, west, east)
+                        <payload>
+
+                    """
         # started digging
         if data[0] == 0:
             if self.client.gamemode != 1:
@@ -192,15 +229,41 @@ class ParseSB(object):
                     "face": data[4]
                 }):
                     return False
-        if data[0] == 5 and data[4] == 255:
-            if self.client.position != (0, 0, 0):
+        if data[0] == 5 and position == (0, 0, 0):
                 playerpos = self.client.position
                 if not self.proxy.eventhandler.callevent("player.interact", {
                     "playername": self.client.username,
                     "position": playerpos,
-                    "action": "finish_using"
+                    "action": "finish_using",
+                    "origin": "pktSB.PLAYER_DIGGING"
                 }):
                     return False
+                """ eventdoc
+                    <group> Proxy <group>
+
+                    <description> Called when the client is eating food, 
+                    pulling back bows, using buckets, etc.
+                    <description>
+
+                    <abortable> Yes <abortable>
+
+                    <comments>
+                    Can be aborted by returning False. Note that the client
+                    may still believe the action happened, but the server
+                    will act as though the event did not happen.  This 
+                    could be confusing to a player.  If the event is aborted, 
+                    consider some feedback to the client (a message, fake 
+                    particles, etc.)
+                    <comments>
+
+                    <payload>
+                    "playername": playername (not the player object!)
+                    "position":  the PLAYERS position - x, y, z, pitch, yaw
+                    "action": "finish_using"  or "use_item"
+                    "origin": Debugging information on where event was parsed.
+                    <payload>
+
+                """
         return True
 
     def parse_play_player_block_placement(self):
@@ -279,14 +342,31 @@ class ParseSB(object):
                 {"playername": player, "position": position,
                  "clickposition": clickposition,
                  "hand": hand, "item": helditem}):
-            ''' EventDoc
-                        <gr> player <gr> group
-                        <desc> When player runs a command. <desc> description
-                        <abortable>
-                        Yes
-                        <abortable>
+            """ eventdoc
+                <group> Proxy <group>
 
-                '''
+                <description> Called when the client places an item
+                <description>
+
+                <abortable> Yes <abortable>
+
+                <comments>
+                Can be aborted by returning False. Note that the client
+                may still believe the action happened, but the server
+                will act as though the event did not happen.  This 
+                could be confusing to a player.  If the event is aborted, 
+                consider some feedback to the client (a message, fake 
+                block, etc.)
+                <comments>
+
+                <payload>
+                "playername": playername (not the player object!)
+                "position":  the PLAYERS position - x, y, z, pitch, yaw
+                "action": "finish_using"  or "use_item"
+                "origin": Debugging information on where event was parsed.
+                <payload>
+
+            """
             return False
         return True
 
@@ -302,13 +382,6 @@ class ParseSB(object):
                     "action": "useitem",
                     "origin": "pktSB.USE_ITEM"
                 }):
-                    '''
-                    :decription: When player places a block or item. "position"
-                    is where new block or item will go (corrected for "face".
-                    "clickposition" is the cooridinates actually clicked on.
-
-                    :Event: Block placement can be rejected by returning False.
-                    '''
                     return False
         return True
 
@@ -376,12 +449,14 @@ class ParseSB(object):
             <comments>
             Can be aborted by returning False.
             Any of the four line arguments can be changed by
-            returning a dictionary payload containing "lineX":
-            "what you want"
+            returning a dictionary payload containing the lines 
+            you want replaced:    
+            
+            `return {"line2": "You can't write", "line3": "that!"}`
             <comments>
 
             <payload>
-            "player": playerobject()
+            "player": player name
             "position": position of sign
             "line1": l1
             "line2": l2
@@ -430,7 +505,6 @@ class ParseSB(object):
         }
 
         if not self.proxy.eventhandler.callevent("player.slotClick", datadict):
-            self.log.debug("slotclick returned False (SB)")
             return False
         """ eventdoc
             <group> Proxy <group>
@@ -446,7 +520,7 @@ class ParseSB(object):
             <comments>
 
             <payload>
-            "player": playerobject()
+            "player": Players name (not the object!)
             "wid": window id ... always 0 for inventory
             "slot": slot number
             "button": mouse / key button
@@ -520,11 +594,11 @@ class ParseSB(object):
 
         # ("uuid:target_player")
         for client in self.proxy.clients:
-            if data[0] == client.uuid:
+            if data[0] == client.online_uuid:
                 self.client.server_connection.packet.sendpkt(
                     self.client.pktSB.SPECTATE,
                     [UUID],
-                    [client.serveruuid])
+                    [client.online_uuid])
                 self.log.debug("spectate returned False (SB)")
                 return False
         return True

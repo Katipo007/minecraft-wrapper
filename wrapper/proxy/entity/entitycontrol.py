@@ -7,8 +7,8 @@
 
 from time import sleep
 import threading
-from proxy.entity.entityclasses import Entities as Entitytypes
-from proxy.entity.entityclasses import Objects as Objecttypes
+from proxy.entity.entitybasics import Entities as Entitytypes
+from proxy.entity.entitybasics import Objects as Objecttypes
 
 
 # noinspection PyPep8Naming
@@ -27,9 +27,10 @@ class EntityControl(object):
                 <object>.<class_method>
             ..
 
-    Valid only with a functioning server.
+    Valid only with a functioning proxy server.
 
-    Entity controls are established by Proxy.base
+    Entity controls are established by Proxy.base and INCLUDE
+    mount/unmount functions!
 
     """
 
@@ -68,15 +69,16 @@ class EntityControl(object):
 
         self.entities = {}
         self._abortep = False
-
-        # entity processor thread
-        t = threading.Thread(target=self._entity_processor,
-                             name="entProc", args=())
-        t.daemon = True
-        t.start()
-
-        # entity killer thread
         if self.entityControl:
+
+            # entity processor thread
+            t = threading.Thread(target=self._entity_processor,
+                                 name="entProc", args=())
+            t.daemon = True
+            t.start()
+
+            # entity killer thread
+
             ekt = threading.Thread(target=self._entity_thinner,
                                    name="entKill", args=())
             ekt.daemon = True
@@ -219,6 +221,10 @@ class EntityControl(object):
 
         self.proxy.eventhandler.callevent(
             "proxy.console", {"command": console_command})
+        """ eventdoc
+                                <description> internalfunction <description>
+
+                            """
 
     def _entity_processor(self):
         self._log.debug("_entityprocessor thread started.")

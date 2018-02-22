@@ -21,6 +21,15 @@
     upon logging off.  Most features are tied heavily to
     proxy mode implementations and the proxy client instance.
 
+    The player object has a self.__str___ representation that returns the
+    player.username.  Therefore, plugins do not need to attempt string
+    conversion or do explicit references to player.username in their code
+    (str(player) or player.username in plugin code).
+
+    When using events, events in the "proxy" (Group 'Proxy') section are only
+    available in proxy mode.  "server" events (Group 'core/mcserver.py')
+    are available even without proxy mode, as long as the server is running.
+
 
     Supported properties of the player:
     
@@ -31,15 +40,15 @@
         self.mojangUuid
         self.offlineUuid
         self.loginposition
+        self.playereid
+        self.ipaddress
 
         # proxy only
-        self.ipaddress
         self.serverUuid (proxy only)
         self.clientUuid (proxy only)
         self.clientgameversion
         self.clientboundPackets = Packets_cb(self.clientgameversion)
         self.serverboundPackets = Packets_sb(self.clientgameversion)
-        self.playereid
 
         # some player properties associated with abilities (proxy)
         # default is 1.  Should normally be congruent with speed.
@@ -61,7 +70,8 @@
         it simply falls back to using the 1.8 'execute' command. To 
         be clear, this does NOT work with any Wrapper.py or plugin 
         commands.  The command does not pass through the wrapper.  
-        It is only sent to the server console.
+        It is only sent to the server console (or the actual server in
+        proxy mode).
 
         :arg string: full command string send on player's behalf to server.
 
@@ -124,11 +134,15 @@
 
         Get the players position
         
-        :Note:  The player's position is obtained by parsing client
+        :Proxymode Note:  The player's position is obtained by parsing client
          packets, which are not sent until the client logs in to 
          the server.  Allow some time after server login to verify 
          the wrapper has had the oppportunity to parse a suitable 
          packet to get the information!
+
+        :Non-proxymode note: will still work, but the returned position will
+         be either the player's login position or where he last teleported
+         to...
         
         :returns: a tuple of the player's current position x, y, z, 
          and yaw, pitch of head.
@@ -139,7 +153,7 @@
 
         Get the player's current gamemode.
         
-        :Note:  The player's Gamemode is obtained by parsing client
+        :Proxymode Note:  The player's Gamemode is obtained by parsing client
          packets, which are not sent until the client logs in to 
          the server.  Allow some time after server login to verify 
          the wrapper has had the oppportunity to parse a suitable 
@@ -153,7 +167,7 @@
 
         Get the player's current dimension.
 
-        :Note:  The player's Dimension is obtained by parsing client
+        :Proxymode Note:  The player's Dimension is obtained by parsing client
          packets, which are not sent until the client logs in to 
          the server.  Allow some time after server login to verify 
          the wrapper has had the oppportunity to parse a suitable 
@@ -177,10 +191,10 @@
 
 -  setResourcePack(self, url, hashrp="")
 
-        Sets the player's resource pack to a different URL. If the
-        user hasn't already allowed resource packs, the user will
-        be prompted to change to the specified resource pack.
-        Probably broken right now.
+        :Proxymode: Sets the player's resource pack to a different URL. If the
+         user hasn't already allowed resource packs, the user will
+         be prompted to change to the specified resource pack.
+         Probably broken right now.
 
         :Args:
             :url: URL of resource pack
@@ -218,17 +232,28 @@
 
         
 
--  message(self, message="")
+-  message(self, message="", position=0)
 
         Sends a message to the player.
 
-        :arg message: Can be text, colorcoded text, or json chat
+        :Args:
+            :message: Can be text, colorcoded text, or chat dictionary of json.
+            :position:  an integer 0-2.  2 will place it above XP bar.
+             1 or 0 will place it in the chat. Using position 2 will
+             only display any text component (or can be used to display
+             standard minecraft translates, such as
+             "{'translate': 'commands.generic.notFound', 'color': 'red'}" and
+             "{'translate': 'tile.bed.noSleep'}")
+
+
+        :returns: Nothing
+
 
         
 
 -  setVisualXP(self, progress, level, total)
 
-         Change the XP bar on the client's side only. Does not
+        :Proxymode: Change the XP bar on the client's side only. Does not
          affect actual XP levels.
 
         :Args:
@@ -242,9 +267,9 @@
 
 -  openWindow(self, windowtype, title, slots)
 
-        Opens an inventory window on the client side.  EntityHorse
-        is not supported due to further EID requirement.  *1.8*
-        *experimental only.*
+        :Proxymode: Opens an inventory window on the client side.  EntityHorse
+         is not supported due to further EID requirement.  *1.8*
+         *experimental only.*
 
         :Args:
             :windowtype:  Window Type (text string). See below
@@ -286,7 +311,8 @@
 
 -  setPlayerAbilities(self, fly)
 
-        *based on old playerSetFly (which was an unfinished function)*
+        :Proxymode: *based on old playerSetFly (which was an unfinished
+         function)*
 
         NOTE - You are implementing these abilities on the client
          side only.. if the player is in survival mode, the server
@@ -326,15 +352,15 @@
 -  sendBlock(self, position, blockid, blockdata, sendblock=True,
                   numparticles=1, partdata=1)
 
-        Used to make phantom blocks visible ONLY to the client.  Sends
-        either a particle or a block to the minecraft player's client.
-        For blocks iddata is just block id - No need to bitwise the
-        blockdata; just pass the additional block data.  The particle
-        sender is only a basic version and is not intended to do
-        anything more than send something like a barrier particle to
-        temporarily highlight something for the player.  Fancy particle
-        operations should be custom done by the plugin or someone can
-        write a nicer particle-renderer.
+        :Proxymode: Used to make phantom blocks visible ONLY to the client.
+         Sends either a particle or a block to the minecraft player's client.
+         For blocks iddata is just block id - No need to bitwise the
+         blockdata; just pass the additional block data.  The particle
+         sender is only a basic version and is not intended to do
+         anything more than send something like a barrier particle to
+         temporarily highlight something for the player.  Fancy particle
+         operations should be custom done by the plugin or someone can
+         write a nicer particle-renderer.
 
         :Args:
 
@@ -362,7 +388,7 @@
 
 -  getItemInSlot(self, slot)
 
-        Returns the item object of an item currently being held.
+        :Proxymode: Returns the item object of an item currently being held.
 
         
 
@@ -437,6 +463,17 @@
 
         
 
+-  resetPerms(self, uuid)
+
+
+        resets all user data (removes all permissions).
+
+        :arg uuid: The online/mojang uuid (string)
+
+        :returns:  nothing
+
+        
+
 -  hasGroup(self, group)
 
         Returns a boolean of whether or not the player is in
@@ -499,6 +536,8 @@
         
 
 -  connect(self, address, port)
+
+        :Proxymode: Presenty buggy, at best!
 
         Upon calling, the player object will become defunct and
         the client will be transferred to another server or wrapper

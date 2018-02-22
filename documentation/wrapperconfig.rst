@@ -7,13 +7,6 @@
 here are inserted or deleted from the the wrapper config
 each time wrapper starts.*
 
-*Items marked as "deprecated" get removed from the wrapper
-config when wrapper starts.  These are are not valid items.
-they only exist so that they will get removed from older
-wrapper versions.  This is intended to keep the actual
-wrapper.config.json file from getting cluttered with old
-unused items.*
-
 *The wrapper.config.json file contents will look like this,
 but without all the comment lines.*
 
@@ -21,15 +14,13 @@ but without all the comment lines.*
 
 CONFIG = {
 
-# Automatic backups with pruning. Intervals are specified in seconds.
+# Backups - Automatic backups with pruning. Intervals are specified in seconds.
 
     "Backups":
 
-        {
-
             "backup-compression": False,
 
-         # Specify files and folders you want backed up.  Items must be in your server folder (see 'General' section)
+         # Specify server files and folders you want backed up.  Items must be in your server folder (see 'General' section)
 
             "backup-folders":
 
@@ -40,9 +31,11 @@ CONFIG = {
 
                 ],
 
+         # backup interval in seconds: 3600 = hourly, 86400 = Daily, 604800 = weekly
+
             "backup-interval": 3600,
 
-         # backup location is inside wrapper's directory
+         # backup location is inside wrapper's directory, unless you use an absolute path (such as /home/otherdirectory/backups)
 
             "backup-location": "backup-directory",
 
@@ -52,23 +45,67 @@ CONFIG = {
 
             "enabled": False
 
-    },
+
+# Alerts - provide email or other notification of wrapper problems (server down, etc).
+
+    "Alerts":
+
+
+         # with some modern email providers, you may need to "allow less secure apps” on your account..
+
+         # You should use a dedicated email with a password that is different from your other accounts for this purpose.
+
+            "enabled": False,
+
+         # enable a server item by setting login name to something other than "False".  Use your email address for login-name and the associated password (encrypt it first).
+
+            "servers": [
+
+                {
+
+         # built in alerts use "wrapper" group.
+
+                    "group": "wrapper",
+
+                    "subject": "Wrapper.py Alert",
+
+                    "type": "email",
+
+                    "address": "smtp.gmail.com",
+
+                    "port": 587,
+
+                    "login-name": False,
+
+                    "encrypted-password": "Copy and Paste from 'password' after wrapper encrypts it.",
+
+                    "recipients": ["email1@provider.com", "email2@provider.com"]
+
+                }
+            ],
+
+
+         # -plaintext items are converted to hashed items by wrapper
+
+            "password-plaintext": False,
+
+            "password": "use `/password -s Alerts password <your password>` to set this (or enter a password-plaintext)."
+
+
+# Gameplay - miscellaneous configuration items.
 
     "Gameplay":
 
-        {
-
-        # Use of timer-tick is not recommended.  1/20th of a second timer option for plugin use. May impact wrapper performance negatively.
+         # Use of timer-tick is not recommended.  1/20th of a second timer option for plugin use. May impact wrapper performance negatively.
 
             "use-timer-tick-event": False,
 
-        },
+
+# Entity processing - This is somewhat superfluous now that minecraft has more built-in entity management gamerules now.  Must be turned on to use player.mount / unmount events.
 
     "Entities":
 
-        {
-
-         # whether to use the wrapper entity controls.
+         # whether to use the wrapper entity controls.  With new minecraft versions, these are largely unnecessary and better done with the Gamerules.
 
             "enable-entity-controls": False,
 
@@ -100,11 +137,10 @@ CONFIG = {
 
             "thin-Chicken": 30
 
-        },
+
+# Updates - Control wrapper update behaviour.
 
     "Updates":
-
-        {
 
          # Use one of the names listed herein (i.e. 'stable-branch')
 
@@ -116,41 +152,49 @@ CONFIG = {
 
          # You can point these to another branch, if desired.
 
-            "stable-branch":
+            "stable-branch": "https://raw.githubusercontent.com/benbaptist/minecraft-wrapper/master",
 
-                "https://raw.githubusercontent.com/benbaptist/minecraft-wrapper/master/build/version.json",
+            "dev-branch": "https://raw.githubusercontent.com/benbaptist/minecraft-wrapper/development",
 
-            "dev-branch":
 
-                "https://raw.githubusercontent.com/benbaptist/minecraft-wrapper/development/build/version.json",
-
-        },
-
-# look 'n' feel type customizations
+# Misc - look 'n' feel type customizations
 
     "Misc":
 
-        {
-
-         # if you change command-prefix, no minecraft command will work. Bug or feature? -TODO not sure.
+         # if you change the command-prefix, no minecraft command will work because minecraft itself only recognizes "/" commands... TODO - Bug or feature? -not sure.
 
             "command-prefix": "/",
 
+         # Reboot message occurs with automatic timed server restarts ["General"]["timed-reboot"]
+
             "reboot-message": "Server is conducting a scheduled reboot. The server will be back momentarily!",
+
+         # Restart message occurs when console command "/restart" is run.
 
             "default-restart-message": "Server restarting...",
 
+         # Stop message is generated from wrapper "/stop" command.
+
             "stop-message": "Stopping The Minecraft Server",
 
-         # readline is likely to be more-cross platform, but does not use wrapper's ability to keep console keystroke entries visually intact while server produces output.
+         # message when wrapper halt is called.
 
-            "use-readline": True
+            "halt-message": "Halting Wrapper...",
 
-        },
+         # Speficy if wrapper should trap control-z and shutdown in a controlled manner (similar to ctrl-c).  If false, follows the behavior permitted by your system (and that might not end well!)  - Discussion: https://github.com/benbaptist/minecraft-wrapper/issues/521
+
+            "trap-ctrl-z": True,
+
+         # Use-betterconsole replaces "use-readline" for clarity about what this option does.  The default is False because use-betterconsole may not be fully cross-platform.  Better Console makes it easier for the console operator too see what they are typing, even while the server or wrapper my be writing output at the same time, essentially produces jline-like functionality to the wrapper console...
+
+            "use-betterconsole": False
+
+
+# General wrapper and server startup options
 
     "General":
 
-        {
+         # restart server automatically if it stops (unless you explicity used the "/stop" command within the console).
 
             "auto-restart": True,
 
@@ -158,51 +202,30 @@ CONFIG = {
 
             "command": "java -jar -Xmx2G -Xms1G server.jar nogui",
 
-            "encoding": "UTF-8",
+         # If not uft-8, specify your system's encoding here.
 
-         # wrapper detects server version and adjusts accordingly now
-
-            "pre-1.7-mode": "deprecated",
+            "encoding": "utf-8",
 
          # Using the default '.' roots the server in the same folder with wrapper. Change this to another folder to keep the wrapper and server folders separate.  Do not use a trailing slash...  e.g. - '/full/pathto/the/server'
 
             "server-directory": ".",
 
-         # server-name was moved to Web (it is used only by web module in code)
-
-            "server-name": "deprecated",
-
             "shell-scripts": False,
 
             "timed-reboot": False,
 
-         # Deprecated for consistency with timed reboot warning 'minutes'
+         # salt is used internally for wrapper encryption.  Do not edit this; Wrapper will create the salt.  It does not matter much that it is on disk here, as the user must create a passphrase also.  This just prevents the need for a hardcoded salt and ensures each wrapper installation will use a different one.
 
-            "timed-reboot-seconds": "deprecated",
+            "salt": False,
 
             "timed-reboot-minutes": 1440,
 
             "timed-reboot-warning-minutes": 5,
 
-         # The remaining items and functionality were moved to group "Updates" and deprecated from this section.
 
-            "auto-update-branch": "deprecated",
-
-            "auto-update-dev-build": "deprecated",
-
-            "auto-update-wrapper": "deprecated",
-
-            "stable-branch":  "deprecated",
-
-            "dev-branch":  "deprecated",
-
-        },
-
-# This allows your users to communicate to and from the server via IRC and vice versa.
+# IRC - This allows your users to communicate to and from the server via IRC and vice versa.
 
     "IRC":
-
-        {
 
             "autorun-irc-commands":
 
@@ -224,7 +247,11 @@ CONFIG = {
 
             "control-from-irc": False,
 
-            "control-irc-pass": "password",
+         # enter a password here and wrapper will convert it to a hashed password
+
+            "control-irc-pass-plaintext": False,
+
+            "control-irc-pass": "from console use `/password IRC control-irc-pass <your password>`",
 
             "irc-enabled": False,
 
@@ -232,7 +259,11 @@ CONFIG = {
 
             "obstruct-nicknames": False,
 
-            "password": None,
+         # enter a password here and wrapper will convert it to a hashed password
+
+            "password-plaintext": False,
+
+            "password": "from console use `/password IRC password <your password>`",
 
             "port": 6667,
 
@@ -242,84 +273,81 @@ CONFIG = {
 
             "show-irc-join-part": True
 
-        },
+# Proxy settings -
 
+# This is a man-in-the-middle proxy similar to BungeeCord, which is used for extra plugin functionality. Online-mode must be set to False in server.properties. Make sure that the server port is not accessible directly from the outside world.
 
+# Note: the online-mode option here refers to the proxy only, not to the server's offline mode.  Each server's online mode will depend on its setting in server.properties.  If you experience issues, you might try turning network-compression-threshold to -1 (off) in server.properties.
 
     "Proxy":
 
-    # This is a man-in-the-middle proxy similar to BungeeCord, which is used for extra plugin functionality. online-mode must be set to False in server.properties. Make sure that the server is not accessible directly from the outside world.
+            "convert-player-files": False,
 
-    # Note: the online-mode option here refers to the proxy only, not to the server's offline mode.  Each server's online mode will depend on its setting in server.properties.  It is recommended that you turn network-compression-threshold to -1 (off) in server.properties for fewer issues.
+         # This actually does nothing in the code. TODO - re-implement this somewhere? perhaps in the server JSON response?
 
-        {
+            "max-players": 1024,
 
-                "convert-player-files": False,
+         # the wrapper's online mode, NOT the server.
 
-            # This actually does nothing in the code. TODO - re-implement this somewhere? perhaps in the server JSON response?
+            "online-mode": True,
 
-                "max-players": 1024,
+            "proxy-bind": "0.0.0.0",
 
-            # the wrapper's online mode, NOT the server.
+            "proxy-enabled": False,
 
-                "online-mode": True,
+         # if wrapper is a sub world (wrapper needs to do extra work to spawn the player).
 
-                "proxy-bind": "0.0.0.0",
+            "proxy-sub-world": False,
 
-                "proxy-enabled": False,
+         # the wrapper's proxy port that accepts client connections from the internet. This port is exposed to the internet via your port forwards.
 
-            # if wrapper is a sub world (wrapper needs to do extra work to spawn the player).
+            "proxy-port": 25565,
 
-                "proxy-sub-world": False,
+         # spigot mode has some slightly "off" bytes in the login sequence.
 
-            # the wrapper's proxy port that accepts client connections from the internet. This port is exposed to the internet via your port forwards.
+            "spigot-mode": False,
 
-                "proxy-port": 25565,
+         # silent bans cause your server to ignore sockets from that IP (for IP bans). This will cause your server to appear offline and avoid possible confrontations.
 
-            # Deprecated - This port is autoconfigured from server console output now.
+            "silent-ipban": True,
 
-                "server-port": "deprecated",
+            "hidden-ops":
 
-                "spigot-mode": False,
+             # these players do not appear in the sample server player list pings.
 
-            # silent bans cause your server to ignore sockets from that IP (for IP bans). This will cause your server to appear offline and avoid possible confrontations.
+                [
 
-                "silent-ipban": True,
+                    "SurestTexas00",
 
-                "hidden-ops":
+                    "BenBaptist"
 
-                # these players do not appear in the sample server player list pings.
+                ]
 
-                    [
+# Web - Web mode allows you to control and monitor the server.  This is not a https connection.  Be mindful of that and don't use the same password you use anywhere else.  It is also advised that this be open only to the localhost.
 
-                        "SurestTexas00",
+    "Web":
 
-                        "BenBaptist"
+            "web-allow-file-management": True,
 
-                    ]
+            "web-bind": "0.0.0.0",
 
-            },
+            "web-enabled": False,
 
-        "Web":
+         # enter a password here and wrapper will convert it to a hashed password
 
-            {
+            "web-password-plaintext": False,
 
-                "public-stats": True,
+            "web-password": "to set this, from console use `/password Web web-password <your password>`",
 
-                "web-allow-file-management": True,
+            "web-port": 8070,
 
-                "web-bind": "0.0.0.0",
+         # By default, wrapper only accepts connections from "safe" IP addresses.  Disable (set 'safe-ips-use' ot false) or add the IP address of computers you may use to access web mode.
 
-                "web-enabled": False,
+            "safe-ips": ["127.0.0.1"],
 
-                "web-password": "password",
+            "safe-ips-use": True,
 
-                "web-port": 8070,
+            "server-name": "Minecraft Server",
 
-                "server-name": "Minecraft Server",
-
-            }
-
-    }
 
 # 
